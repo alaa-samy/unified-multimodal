@@ -1,40 +1,69 @@
-//     </div>
-//   );
-// }
-
-
-
 "use client";
 
-import { useState, useRef, useImperativeHandle, forwardRef } from "react";
+import { useState, useRef, useEffect } from "react";
+import { Square } from "lucide-react";
 
-export function UnifiedSearchInput({ onSearch, loading }: any) {
+interface UnifiedSearchInputProps {
+  onSearch: (data: { query: string; image: File | null; voiceText: string }) => void;
+  loading: boolean;
+  searchCancelable: boolean;
+  onCancelSearch: () => void;
+}
+
+interface TranscriptionResponse {
+  ok?: boolean;
+  text?: string;
+  error?: string | null;
+  warning?: string | null;
+  looks_like_search?: boolean;
+}
+
+export function UnifiedSearchInput({ onSearch, loading, searchCancelable, onCancelSearch }: UnifiedSearchInputProps) {
   const [query, setQuery]               = useState("");
   const [imageFiles, setImageFiles]     = useState<File[]>([]);
-  const [audioFile, setAudioFile]       = useState<File | null>(null);
   const [recording, setRecording]       = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
+  const [voiceText, setVoiceText]       = useState("");
+  const [voiceWarning, setVoiceWarning] = useState("");
+  const [voiceError, setVoiceError]     = useState("");
+  const [hasVoiceAttachment, setHasVoiceAttachment] = useState(false);
   const [imagePreviews, setImagePreviews] = useState<string[]>([]);
-  const [audioLabel, setAudioLabel]     = useState<string>("");
 
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef   = useRef<Blob[]>([]);
   const fileInputRef     = useRef<HTMLInputElement>(null);
+  const wavFileRef       = useRef<File | null>(null);
+  const rawBlobRef       = useRef<Blob | null>(null);
+
+  useEffect(() => () => {
+    const recorder = mediaRecorderRef.current;
+    if (recorder) {
+      recorder.ondataavailable = null;
+      recorder.onstop = null;
+      if (recorder.state !== "inactive") recorder.stop();
+      recorder.stream.getTracks().forEach(track => track.stop());
+      mediaRecorderRef.current = null;
+    }
+  }, []);
 
   // ── Convert any audio blob → 16kHz mono WAV in browser (no ffmpeg) ──
   async function blobToWav(blob: Blob): Promise<File> {
     const arrayBuffer = await blob.arrayBuffer();
     const audioCtx    = new AudioContext();
-    const decoded     = await audioCtx.decodeAudioData(arrayBuffer);
-    const targetSr    = 16000;
-    const offCtx      = new OfflineAudioContext(1, Math.ceil(decoded.duration * targetSr), targetSr);
-    const src         = offCtx.createBufferSource();
-    src.buffer        = decoded;
-    src.connect(offCtx.destination);
-    src.start(0);
-    const rendered = await offCtx.startRendering();
-    await audioCtx.close();
-    const samples  = rendered.getChannelData(0);
-    return new File([encodeWav(samples, targetSr)], "recording.wav", { type: "audio/wav" });
+    try {
+      const decoded     = await audioCtx.decodeAudioData(arrayBuffer);
+      const targetSr    = 16000;
+      const offCtx      = new OfflineAudioContext(1, Math.ceil(decoded.duration * targetSr), targetSr);
+      const src         = offCtx.createBufferSource();
+      src.buffer        = decoded;
+      src.connect(offCtx.destination);
+      src.start(0);
+      const rendered = await offCtx.startRendering();
+      const samples  = rendered.getChannelData(0);
+      return new File([encodeWav(samples, targetSr)], "recording.wav", { type: "audio/wav" });
+    } finally {
+      await audioCtx.close();
+    }
   }
 
   function encodeWav(samples: Float32Array, sr: number): ArrayBuffer {
@@ -56,33 +85,90 @@ export function UnifiedSearchInput({ onSearch, loading }: any) {
     return buf;
   }
 
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+
+  function clearVoice() {
+    setVoiceText("");
+    setVoiceWarning("");
+    setVoiceError("");
+    setHasVoiceAttachment(false);
+    setTranscribing(false);
+    wavFileRef.current = null;
+    rawBlobRef.current = null;
+  }
+
+  async function transcribeWav(wav: File) {
+    wavFileRef.current = wav;
+    setHasVoiceAttachment(true);
+    setVoiceError("");
+    setTranscribing(true);
+
+    try {
+      const form = new FormData();
+      form.append("audio", wav);
+      const response = await fetch(`${apiUrl}/transcribe`, { method: "POST", body: form });
+      const data = await response.json().catch(() => null) as TranscriptionResponse | null;
+      if (!response.ok || !data?.ok) {
+        const detail = data?.error?.trim();
+        throw new Error(detail || `Transcription failed (${response.status || "unknown status"})`);
+      }
+
+      setVoiceText(typeof data.text === "string" ? data.text : "");
+      setVoiceWarning(typeof data.warning === "string" ? data.warning : "");
+      setVoiceError(typeof data.error === "string" ? data.error : "");
+      if (data.looks_like_search === false && !data.warning) {
+        setVoiceWarning("This may not be a furniture search. You can edit it before searching.");
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setVoiceText("");
+      setVoiceWarning("");
+      setVoiceError(message.toLowerCase().includes("failed to fetch")
+        ? `I can't reach the search server at ${apiUrl}. Please check that the backend is running.`
+        : message);
+    } finally {
+      setTranscribing(false);
+    }
+  }
+
+  async function prepareAndTranscribe(blob: Blob) {
+    rawBlobRef.current = blob;
+    setHasVoiceAttachment(true);
+    setTranscribing(true);
+    setVoiceError("");
+    try {
+      const wav = await blobToWav(blob);
+      await transcribeWav(wav);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setVoiceError(message);
+      setTranscribing(false);
+    }
+  }
+
   // ── Voice Recording ──────────────────────────────────────────
   async function startRecording() {
+    clearVoice();
+    let stream: MediaStream | null = null;
     try {
-      const stream   = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recordingStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = recordingStream;
       const mimeType = ["audio/webm;codecs=opus","audio/webm","audio/ogg;codecs=opus","audio/mp4"]
         .find(m => MediaRecorder.isTypeSupported(m)) || "";
-      mediaRecorderRef.current = new MediaRecorder(stream, mimeType ? { mimeType } : {});
+      mediaRecorderRef.current = new MediaRecorder(recordingStream, mimeType ? { mimeType } : {});
       audioChunksRef.current   = [];
 
       mediaRecorderRef.current.ondataavailable = (e) => { if (e.data.size > 0) audioChunksRef.current.push(e.data); };
       mediaRecorderRef.current.onstop = async () => {
         const rawBlob = new Blob(audioChunksRef.current, { type: mediaRecorderRef.current?.mimeType || "audio/webm" });
-        stream.getTracks().forEach(t => t.stop());
+        recordingStream.getTracks().forEach(t => t.stop());
         mediaRecorderRef.current = null;
-        try {
-          const wav = await blobToWav(rawBlob);
-          setAudioFile(wav);
-          setAudioLabel(`${Math.round(wav.size / 1024)}KB · WAV 16kHz`);
-        } catch {
-          const fb = new File(audioChunksRef.current, "recording.webm", { type: rawBlob.type });
-          setAudioFile(fb);
-          setAudioLabel(`${Math.round(fb.size / 1024)}KB · WEBM`);
-        }
+        await prepareAndTranscribe(rawBlob);
       };
       mediaRecorderRef.current.start(100);
       setRecording(true);
     } catch {
+      stream?.getTracks().forEach(track => track.stop());
       alert("Could not access microphone. Please allow permissions.");
     }
   }
@@ -114,25 +200,23 @@ export function UnifiedSearchInput({ onSearch, loading }: any) {
     setImagePreviews(prev => prev.filter((_, i) => i !== index)); 
     if (fileInputRef.current && imageFiles.length === 1) fileInputRef.current.value = ""; 
   };
-  const removeAudio = () => { setAudioFile(null); setAudioLabel(""); };
-
   // ── Clear everything after submit ────────────────────────────
   function clearAll() {
     setQuery("");
     setImageFiles([]);
     setImagePreviews([]);
-    setAudioFile(null);
-    setAudioLabel("");
+    clearVoice();
     if (fileInputRef.current) fileInputRef.current.value = "";
   }
 
   // ── Submit ───────────────────────────────────────────────────
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!query.trim() && imageFiles.length === 0 && !audioFile) return;
+    const trimmedVoiceText = voiceText.trim();
+    if (!query.trim() && imageFiles.length === 0 && !trimmedVoiceText) return;
 
     // Capture current values before clearing
-    const submitData = { query: query.trim(), images: imageFiles, audio: audioFile };
+    const submitData = { query: query.trim(), image: imageFiles[0] || null, voiceText: trimmedVoiceText };
 
     // Clear inputs immediately so UI feels responsive
     clearAll();
@@ -141,14 +225,14 @@ export function UnifiedSearchInput({ onSearch, loading }: any) {
     onSearch(submitData);
   };
 
-  const activeInputs = [query.trim() && "text", imageFiles.length > 0 && "image", audioFile && "voice"].filter(Boolean);
+  const activeInputs = [query.trim() && "text", imageFiles.length > 0 && "image", voiceText.trim() && "voice"].filter(Boolean);
 
   return (
     <div className="w-full">
       <form onSubmit={handleSubmit} className="space-y-3">
 
         {/* Attachments */}
-        {(imageFiles.length > 0 || audioFile) && (
+        {(imageFiles.length > 0 || hasVoiceAttachment || transcribing) && (
           <div className="flex flex-wrap gap-2 p-3 bg-gray-50 rounded-xl border border-gray-200">
             {imageFiles.map((file, i) => (
               <div key={i} className="flex items-center gap-2 bg-white rounded-lg p-2 border border-gray-200 shadow-sm">
@@ -160,14 +244,40 @@ export function UnifiedSearchInput({ onSearch, loading }: any) {
                 <button type="button" onClick={() => removeImage(i)} className="text-red-400 hover:text-red-600 font-bold ml-1">×</button>
               </div>
             ))}
-            {audioFile && (
-              <div className="flex items-center gap-2 bg-white rounded-lg p-2 border border-green-200 shadow-sm">
-                <div className="w-10 h-10 bg-green-100 rounded flex items-center justify-center text-xl">🎤</div>
-                <div className="flex flex-col">
-                  <span className="text-xs font-medium">Voice Recording</span>
-                  <span className="text-xs text-gray-400">{audioLabel}</span>
+            {(hasVoiceAttachment || transcribing) && (
+              <div className="min-w-[min(100%,20rem)] flex-1 bg-white rounded-lg p-3 border border-green-200 shadow-sm">
+                <div className="flex items-center gap-2">
+                  <span className="text-lg" aria-hidden="true">🎤</span>
+                  {transcribing ? (
+                    <span className="flex items-center gap-2 text-xs text-gray-600">
+                      <span className="w-3 h-3 border-2 border-violet-500 border-t-transparent rounded-full animate-spin inline-block" />
+                      Transcribing...
+                    </span>
+                  ) : (
+                    <input
+                      aria-label="Edit voice transcript"
+                      value={voiceText}
+                      onChange={event => setVoiceText(event.target.value)}
+                      placeholder="Edit what you said..."
+                      className="min-w-0 flex-1 border border-gray-200 rounded-md px-2 py-1 text-sm outline-none focus:border-violet-400"
+                    />
+                  )}
+                  <button type="button" onClick={clearVoice} className="text-red-400 hover:text-red-600 font-bold" aria-label="Clear voice transcript">×</button>
                 </div>
-                <button type="button" onClick={removeAudio} className="text-red-400 hover:text-red-600 font-bold ml-1">×</button>
+                {!transcribing && (
+                  <div className="mt-2 flex items-center justify-between gap-3">
+                    {voiceError ? (
+                      <button type="button" onClick={() => wavFileRef.current ? transcribeWav(wavFileRef.current) : rawBlobRef.current && prepareAndTranscribe(rawBlobRef.current)} className="text-xs font-medium text-violet-700 hover:text-violet-900">
+                        Try again
+                      </button>
+                    ) : <span />}
+                    <button type="button" onClick={startRecording} disabled={loading || recording} className="text-xs font-medium text-violet-700 hover:text-violet-900 disabled:opacity-40">
+                      Record again
+                    </button>
+                  </div>
+                )}
+                {voiceWarning && <p className="mt-2 text-xs text-amber-700">{voiceWarning}</p>}
+                {voiceError && <p className="mt-2 text-xs text-red-600">{voiceError}</p>}
               </div>
             )}
           </div>
@@ -187,7 +297,6 @@ export function UnifiedSearchInput({ onSearch, loading }: any) {
             <input
               value={query}
               onChange={e => setQuery(e.target.value)}
-              onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(e as any); } }}
               placeholder='Type, upload image, or record voice...'
               className="flex-1 border-0 bg-transparent text-sm outline-none placeholder:text-gray-400"
               disabled={loading}
@@ -199,24 +308,36 @@ export function UnifiedSearchInput({ onSearch, loading }: any) {
                     title="Upload image">📷</button>
 
             {!recording ? (
-              <button type="button" onClick={startRecording} disabled={loading}
-                      className={`p-1.5 rounded-lg text-lg transition-colors ${audioFile ? "bg-green-100" : "hover:bg-green-50"}`}
+                    <button type="button" onClick={startRecording} disabled={loading || transcribing}
+                      className={`p-1.5 rounded-lg text-lg transition-colors ${hasVoiceAttachment ? "bg-green-100" : "hover:bg-green-50"}`}
                       title="Record voice">🎤</button>
             ) : (
               <button type="button" onClick={stopRecording}
                       className="p-1.5 bg-red-50 rounded-lg text-lg animate-pulse" title="Stop">⏹️</button>
             )}
 
-            <button type="submit"
-                    disabled={loading || (!query.trim() && imageFiles.length === 0 && !audioFile)}
-                    className="px-4 py-2 bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-40 transition-colors text-sm font-medium whitespace-nowrap">
-              {loading ? (
-                <span className="flex items-center gap-1.5">
-                  <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin inline-block" />
-                  ...
-                </span>
-              ) : "Search"}
-            </button>
+            {loading && searchCancelable ? (
+              <button
+                type="button"
+                onClick={onCancelSearch}
+                className="inline-flex items-center gap-1.5 px-3 py-2 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 transition-colors text-sm font-medium whitespace-nowrap"
+                aria-label="Stop search"
+              >
+                <Square size={14} strokeWidth={2.5} aria-hidden="true" />
+                Stop
+              </button>
+            ) : (
+              <button type="submit"
+                disabled={loading || recording || transcribing || (!query.trim() && imageFiles.length === 0 && !voiceText.trim())}
+                className="px-4 py-2 bg-violet-600 text-white rounded-lg hover:bg-violet-700 disabled:opacity-40 transition-colors text-sm font-medium whitespace-nowrap">
+                {loading || transcribing ? (
+                  <span className="flex items-center gap-1.5">
+                    <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin inline-block" />
+                    {transcribing ? "Transcribing..." : "..."}
+                  </span>
+                ) : "Search"}
+              </button>
+            )}
           </div>
 
           {recording && (

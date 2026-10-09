@@ -34,25 +34,29 @@ interface ChatMessage {
   imagePreview?: string;
   voiceQuery?: string;
   voiceError?: string;
+  voiceRejectedText?: string;
   thinking?: boolean;
   animate?: boolean;
   results?: any[];
   color?: string | null;
   mode?: string;
+  lowConfidence?: boolean;
+  totalResults?: number;
 }
 
 type Screen = "search" | "checkout" | "confirmation";
+
 
 // ── Typewriter ────────────────────────────────────────────
 function useTypewriter(text: string, speed = 22) {
   const [displayed, setDisplayed] = useState("");
   const key = useRef(0);
-  
+
   useEffect(() => {
     const myKey = ++key.current;
     setDisplayed("");
     if (!text) return;
-    
+
     const words = text.split(" ");
     let i = 0;
     const t = setInterval(() => {
@@ -67,10 +71,10 @@ function useTypewriter(text: string, speed = 22) {
         clearInterval(t);
       }
     }, speed);
-    
+
     return () => clearInterval(t);
   }, [text]);
-  
+
   return displayed;
 }
 
@@ -89,72 +93,64 @@ function Dots() {
   );
 }
 
-// ── AI Response Generation ────────────────────────────────
-function generateAISummary(
-  query: string | undefined,
-  voiceQuery: string | undefined,
-  voiceError: string | null | undefined,
-  results: any[],
-  colorFilter: string | null | undefined,
-  hasImage: boolean,
-  corrected?: string,
-): string {
-  const q = (query || "").trim();
-  const vq = (voiceQuery || "").trim();
-  const ve = voiceError || null;
-  const cf = colorFilter || null;
-  const label = corrected && corrected !== q ? corrected : vq || q || "your query";
-  const count = results?.length ?? 0;
+function safeChatValue(value: unknown): string {
+  if (typeof value !== "string") return "";
+  return value
+    .replace(/\b(?:undefined|null)\b/gi, "")
+    .replace(/\s+([.,;:!?])/g, "$1")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
 
-  // Voice error handling
-  if (ve && ve.toLowerCase().includes("noise")) {
-    return q
-      ? `I noticed some background noise in your voice recording, so I used your text "${q}" instead. Found ${count} result${count !== 1 ? "s" : ""} for you.`
-      : `I heard some background noise but couldn't quite catch your search. Could you try speaking again or typing your request?`;
-  }
+function generateAISummary(data: {
+  query: string;
+  voiceText: string;
+  voiceQuery: unknown;
+  voiceError: unknown;
+  voiceRejectedText: unknown;
+  results: any[];
+  totalResults: number;
+  lowConfidence: boolean;
+  colorFilter: unknown;
+  categoryFilter: unknown;
+  correctedQuery: unknown;
+  fallbackTier: unknown;
+  hasImage: boolean;
+}): string {
+  const query = safeChatValue(data.query);
+  const voiceQuery = safeChatValue(data.voiceQuery) || safeChatValue(data.voiceText);
+  const voiceError = safeChatValue(data.voiceError);
+  const rejectedText = safeChatValue(data.voiceRejectedText);
+  const color = safeChatValue(data.colorFilter);
+  const category = safeChatValue(data.categoryFilter);
+  const corrected = safeChatValue(data.correctedQuery);
+  const fallbackTier = safeChatValue(data.fallbackTier);
+  const originalQuery = voiceQuery || query || (data.hasImage ? "your photo" : "your search");
+  const displayQuery = corrected || originalQuery;
+  const count = Number.isFinite(data.totalResults) ? data.totalResults : data.results.length;
+  const description = displayQuery === "your photo" ? "your photo" : `"${displayQuery}"`;
+  const wasCorrected = corrected && corrected.toLowerCase() !== originalQuery.toLowerCase();
 
-  const topScore = results?.[0] ? Math.round((results[0].score ?? 0) * 100) : 0;
-  const lowConf = count > 0 && topScore < 60;
-  const colorMatches = results.filter(r => r.color?.toLowerCase() === cf?.toLowerCase()).length;
-
-  // No results at all
-  if (count === 0) {
-    if (cf) {
-      return `I searched for "${label}" but I couldn't find any items in ${cf}. Try removing the color filter or searching for a different style.`;
-    }
-    return `I couldn't find any items matching "${label}". Try using broader terms like "sofa" or "chair", or upload a photo of what you're looking for.`;
-  }
-
-  // Build response parts
-  const parts: string[] = [];
-  
-  if (vq && q) {
-    parts.push(`I've combined your voice request for "${vq}" with your text "${q}".`);
-  } else if (vq) {
-    parts.push(`I heard you looking for "${vq}".`);
-  } else if (hasImage && q) {
-    parts.push(`I've analyzed your image and matched it with the description "${q}".`);
-  } else if (hasImage) {
-    parts.push(`I've found items that are visually similar to your photo.`);
+  let summary: string;
+  if (data.lowConfidence && count > 0) {
+    summary = `I couldn't find a strong match for ${description}, so here are the closest visual matches. Try rephrasing or uploading a photo.`;
+  } else if (fallbackTier === "color_relaxed" && count > 0) {
+    summary = color
+      ? `I found few items matching ${description} in ${color}, so here are the closest visual matches.`
+      : `I found few items matching ${description}, so here are the closest visual matches.`;
+  } else if (count === 0) {
+    summary = `I couldn't find any matches for ${description}. Try changing the color or rephrasing your search.`;
   } else {
-    parts.push(`I found several matches for "${q}".`);
+    summary = `I searched for ${description} and found ${count} closest visual matches${color && category ? ` for ${color} ${category}s` : ""}.`;
   }
 
-  if (cf) {
-    if (colorMatches === 0) {
-      parts.push(`I couldn't find any items exactly in ${cf}, so I'm showing you the most similar styles in other colors.`);
-    } else {
-      parts.push(`I've prioritized items in ${cf} for you.`);
-    }
+  if (wasCorrected) summary = `I read that as "${corrected}". ${summary}`;
+  if (voiceError || rejectedText) {
+    const voiceNote = voiceError || `I heard "${rejectedText}", but couldn't use that voice input`;
+    summary = `${summary.replace(/[.!?]$/, "")}. ${voiceNote}.`;
   }
 
-  if (lowConf) {
-    parts.push(`The matches aren't perfect, but these are the closest items in our catalog.`);
-  } else {
-    parts.push(`Here are the best matches I found.`);
-  }
-
-  return parts.join(" ");
+  return safeChatValue(summary);
 }
 
 // ── Chat Bubbles ───────────────────────────────────────────
@@ -164,12 +160,20 @@ function UserBubble({
   imagePreview,
   voiceQuery,
   voiceError,
-}: any) {
+  voiceRejectedText,
+}: {
+  text?: string;
+  hasImage?: boolean;
+  imagePreview?: string;
+  voiceQuery?: string;
+  voiceError?: string;
+  voiceRejectedText?: string;
+}) {
   return (
     <div className="flex gap-3 items-start justify-end">
       <div className="max-w-sm w-full">
         <div className="bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-2xl rounded-tr-none px-4 py-3 shadow text-sm leading-relaxed">
-          {text && <p>{text}</p>}
+          {safeChatValue(text) && <p>{safeChatValue(text)}</p>}
           {imagePreview && (
             <div className="mt-2">
               <img
@@ -182,11 +186,11 @@ function UserBubble({
           {hasImage && !imagePreview && (
             <p className="opacity-75 text-xs mt-1">📷 Image attached</p>
           )}
-          {voiceQuery && !voiceError && (
-            <p className="opacity-80 text-xs mt-1">🎤 Heard: "{voiceQuery}"</p>
+          {voiceQuery && (
+            <p className="opacity-80 text-xs mt-1">🎤 "{safeChatValue(voiceQuery)}"</p>
           )}
-          {voiceError && (
-            <p className="opacity-60 text-xs mt-1">🎤 {voiceError}</p>
+          {(voiceError || voiceRejectedText) && (
+            <p className="opacity-80 text-xs mt-1">🎤 {safeChatValue(voiceError) || "Voice input was rejected"}{voiceRejectedText ? ` (heard "${safeChatValue(voiceRejectedText)}")` : ""}</p>
           )}
         </div>
       </div>
@@ -207,7 +211,7 @@ function AIBubble({
   animate?: boolean;
 }) {
   const typed = useTypewriter(animate ? text : "", 20);
-  
+
   return (
     <div className="flex gap-3 items-start">
       <div className="w-8 h-8 rounded-full bg-gradient-to-br from-violet-600 to-indigo-500 flex items-center justify-center text-white text-xs font-bold flex-shrink-0 shadow">
@@ -219,7 +223,7 @@ function AIBubble({
             Searching<Dots />
           </span>
         ) : (
-          <span>{animate ? typed : text}</span>
+          <span>{safeChatValue(animate ? typed : text)}</span>
         )}
       </div>
     </div>
@@ -235,7 +239,9 @@ export default function SearchInterface() {
   const [screen, setScreen] = useState<Screen>("search");
   const [orderId, setOrderId] = useState("");
   const [showGenerator, setShowGenerator] = useState(false);
+  const [searchCancelable, setSearchCancelable] = useState(false);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const searchControllerRef = useRef<AbortController | null>(null);
   const { totalItems, addItem, sessionId } = useCart();
 
   useEffect(() => {
@@ -252,22 +258,25 @@ export default function SearchInterface() {
 
   async function handleSearch(data: {
     query: string;
-    images: File[];
-    audio: File | null;
+    image: File | null;
+    voiceText: string;
   }) {
-    const { query, images, audio } = data;
-    if (!query && images.length === 0 && !audio) return;
+    const query = safeChatValue(data.query);
+    const voiceText = safeChatValue(data.voiceText);
+    const image = data.image;
+    if (!query && !image && !voiceText) return;
 
     setLoading(true);
     const startTime = Date.now();
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
     let imagePreview: string | undefined;
-    if (images.length > 0) {
+    if (image) {
       try {
         imagePreview = await new Promise<string>((res) => {
           const r = new FileReader();
           r.onload = (e) => res(e.target?.result as string);
-          r.readAsDataURL(images[0]);
+          r.readAsDataURL(image);
         });
       } catch {
         /* ignore */
@@ -277,56 +286,68 @@ export default function SearchInterface() {
     push({
       type: "user",
       text: query,
-      hasImage: images.length > 0,
+      hasImage: !!image,
       imagePreview,
+      voiceQuery: voiceText,
     });
     push({ type: "ai", thinking: true });
+    const controller = new AbortController();
+    searchControllerRef.current = controller;
+    setSearchCancelable(true);
 
     try {
       const form = new FormData();
       form.append("top_k", "20");
       form.append("query", query || "");
       form.append("session_id", sessionId);
-      images.forEach((img) => form.append("image", img));
-      if (audio) form.append("audio", audio);
+      if (image) form.append("file", image);
+      if (voiceText) form.append("voice_text", voiceText);
 
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const res = await fetch(`${apiUrl}/search/intelligent`, {
         method: "POST",
         body: form,
+        signal: controller.signal,
       });
 
       if (!res.ok) throw new Error(`Backend error ${res.status}`);
 
       const d = await res.json();
-      const results = d.accurate_results || [];
-      const aiSummary = d.ai_summary || "";
-      const voiceQuery = d.voice_query || "";
-      const voiceError = d.voice_error || null;
-      const colorFilter = d.color_filter || null;
-      const searchMode = d.search_mode || "";
-      const corrected = d.corrected_query || undefined;
+      const results = Array.isArray(d?.accurate_results) ? d.accurate_results : [];
+      const totalResults = typeof d?.total_results === "number" && Number.isFinite(d.total_results)
+        ? d.total_results
+        : results.length;
+      const voiceError = safeChatValue(d?.voice_error);
+      const voiceRejectedText = safeChatValue(d?.voice_rejected_text);
+      const lowConfidence = d?.low_confidence === true;
+      const colorFilter = safeChatValue(d?.color_filter) || null;
+      const searchMode = safeChatValue(d?.search_mode);
       const responseTime = Date.now() - startTime;
 
-      // Update user bubble with voice info
+      // Keep the confirmed transcript in the user bubble and add backend voice diagnostics.
       setChat((p) => {
         const c = [...p];
         const lastIdx = c.length - 2;
         if (lastIdx >= 0 && c[lastIdx].type === "user") {
-          c[lastIdx] = { ...c[lastIdx], voiceQuery, voiceError };
+          c[lastIdx] = { ...c[lastIdx], voiceError, voiceRejectedText };
         }
         return c;
       });
 
-      const summary = aiSummary || generateAISummary(
+      const summary = generateAISummary({
         query,
-        voiceQuery,
-        voiceError,
+        voiceText,
+        voiceQuery: d?.voice_query,
+        voiceError: d?.voice_error,
+        voiceRejectedText: d?.voice_rejected_text,
         results,
-        colorFilter,
-        !!imagePreview,
-        corrected
-      );
+        totalResults,
+        lowConfidence,
+        colorFilter: d?.color_filter,
+        categoryFilter: d?.category_filter,
+        correctedQuery: d?.corrected_query,
+        fallbackTier: d?.fallback_tier,
+        hasImage: !!imagePreview,
+      });
 
       patch({
         thinking: false,
@@ -340,6 +361,8 @@ export default function SearchInterface() {
           results,
           color: colorFilter,
           mode: searchMode,
+          lowConfidence,
+          totalResults,
         });
       }
 
@@ -347,20 +370,29 @@ export default function SearchInterface() {
       console.log({
         sessionId,
         query,
-        voiceQuery,
+        voiceQuery: safeChatValue(d?.voice_query) || voiceText,
         voiceError,
         mode: searchMode,
         results: results.length,
         topScore: results[0]?.score || 0,
         responseTime,
       });
-    } catch (err: any) {
+    } catch (err) {
+      if (controller.signal.aborted) {
+        patch({ thinking: false, text: "Search stopped.", animate: false });
+        return;
+      }
+      const message = err instanceof Error ? err.message : "Unknown error";
       patch({
         thinking: false,
-        text: `Something went wrong: ${err.message}. Make sure the backend is running.`,
+        text: message.toLowerCase().includes("failed to fetch")
+          ? `I can't reach the search server at ${apiUrl}. Please check that the backend is running.`
+          : `Something went wrong: ${safeChatValue(message) || "Unknown error"}.`,
         animate: true,
       });
     } finally {
+      if (searchControllerRef.current === controller) searchControllerRef.current = null;
+      setSearchCancelable(false);
       setLoading(false);
     }
   }
@@ -375,13 +407,14 @@ export default function SearchInterface() {
 
     try {
       const res = await fetch(imageUrl);
+      if (!res.ok) throw new Error(`Generated image could not be loaded (${res.status})`);
       const blob = await res.blob();
       const file = new File([blob], `generated_${Date.now()}.jpg`, { type: blob.type });
-      
+
       // Add the AI message showing what was generated
       push({
         type: "ai",
-        text: `Here is the furniture I generated to match your idea: "${prompt}"`,
+        text: `Here is the furniture I generated to match your idea: "${safeChatValue(prompt)}"`,
         animate: true,
       });
 
@@ -394,9 +427,15 @@ export default function SearchInterface() {
       });
 
       // Pass it directly to handleSearch
-      handleSearch({ query: "", images: [file], audio: null });
+      handleSearch({ query: "", image: file, voiceText: "" });
     } catch (e) {
       console.error(e);
+      const message = e instanceof Error ? e.message : "Unknown error";
+      push({
+        type: "ai",
+        text: `I couldn't load the generated image. ${safeChatValue(message) || "Please try generating it again."}`,
+        animate: true,
+      });
       setLoading(false);
     }
   };
@@ -473,6 +512,7 @@ export default function SearchInterface() {
                 imagePreview={entry.imagePreview}
                 voiceQuery={entry.voiceQuery}
                 voiceError={entry.voiceError}
+                voiceRejectedText={entry.voiceRejectedText}
               />
             );
           }
@@ -493,7 +533,7 @@ export default function SearchInterface() {
               <div key={i} className="space-y-3">
                 <div className="flex items-center gap-3">
                   <span className="text-xs text-gray-400 uppercase tracking-wider font-semibold">
-                    {entry.results.length} Results
+                    {entry.totalResults ?? entry.results.length} Results
                   </span>
                   <div className="flex-1 h-px bg-gray-200" />
                   {entry.color && (
@@ -518,6 +558,11 @@ export default function SearchInterface() {
                     </span>
                   )}
                 </div>
+                {entry.lowConfidence && (
+                  <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
+                    No strong match - showing the closest items
+                  </p>
+                )}
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                   {entry.results.slice(0, 12).map((p) => (
                     <SearchCard
@@ -558,8 +603,13 @@ export default function SearchInterface() {
       {/* Input */}
       <div className="sticky bottom-0 bg-white/80 backdrop-blur-md border-t border-gray-200 px-4 py-3 flex-shrink-0">
         <div className="max-w-3xl mx-auto flex flex-col items-center">
-          <UnifiedSearchInput onSearch={handleSearch} loading={loading} />
-          <button 
+          <UnifiedSearchInput
+            onSearch={handleSearch}
+            loading={loading}
+            searchCancelable={searchCancelable}
+            onCancelSearch={() => searchControllerRef.current?.abort()}
+          />
+          <button
             onClick={() => setShowGenerator(true)}
             className="mt-3 text-xs font-semibold text-violet-600 hover:text-violet-800 transition-colors flex items-center gap-1"
           >
@@ -570,7 +620,7 @@ export default function SearchInterface() {
 
       {/* Modals */}
       {showGenerator && (
-        <ImageGenerator 
+        <ImageGenerator
           onGenerateComplete={handleGenerateComplete}
           onCancel={() => setShowGenerator(false)}
         />

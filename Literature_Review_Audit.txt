@@ -1,0 +1,283 @@
+MULTIVIEW THESIS - LITERATURE REVIEW AUDIT
+============================================
+
+
+1. PROJECT OVERVIEW
+--------------------
+
+MULTIVIEW is the software artifact behind the thesis "Unified Multimodal
+Architecture for Enhanced E-Commerce Product Discovery." It's a working
+full-stack prototype:
+
+- Frontend: Next.js 15 / React 19 / Tailwind - unified search bar (text,
+  image upload, voice), search results, AR viewer (@google/model-viewer,
+  WebXR), checkout/payment flow, and an evaluation dashboard.
+- Backend: FastAPI + PyTorch - CLIP embeddings for text/image search, FAISS
+  for vector similarity retrieval, OpenAI Whisper for voice-to-text, LLaVA
+  for richer visual reasoning, Pollinations.ai for generative fallback
+  images when no catalog match exists.
+- Data: Pix3D dataset - 10,069 furniture products, each with a real photo
+  and a paired 3D model (converted to GLB for AR/3D viewing).
+- Evaluation: logs CLIP relevance scores, response time, and a 7-question
+  Likert survey.
+
+Core research claim: no prior published system unifies text + image +
+voice search, CLIP/LLaVA-based retrieval, generative fallback imagery,
+AR/3D visualization, and checkout into one cohesive discovery pipeline -
+MULTIVIEW is that unification, evaluated via Design Science Research
+methodology (Hevner et al.).
+
+The thesis's own Chapter 2 already reviews 25 sources (2023-2026). I had
+agents independently re-read all 23 corresponding PDFs in the literatures
+folder and re-judge relevance from scratch, rather than trusting the
+thesis's own framing.
+
+
+2. PER-PAPER VERDICTS (all 23 PDFs read independently)
+--------------------------------------------------------
+
+Legend: Include? -- Yes / Maybe / No
+
+--- Highly relevant - core supporting citations ---
+
+* Beyond Text: Text-Image Fusion for Scalable Two-Tower Retrieval
+  (Zhang et al., Target, 2026)
+  Two-tower CLIP text/image fusion for e-commerce search at Target;
+  mixture-of-modality-experts, 3-stage curriculum training, +4.86%
+  nDCG@1 over text-only, sub-100ms CPU serving via ANN indexing.
+  Include? YES
+
+* VL-CLIP (Giahi et al., Walmart, RecSys '25)
+  Grounding-DINO crops products before CLIP encoding + LLM-cleaned text
+  descriptions; production deployment at Walmart scale: +18.6% CTR,
+  +15.5% add-to-cart, +4.0% GMV.
+  Include? YES
+
+* MOON (Zhang et al., Alibaba/Taobao, WSDM '26)
+  First generative-MLLM (not dual-encoder) product representation model;
+  core-product cropping, hard-negative sampling on real purchase
+  triplets; SOTA vs. CLIP/SigLIP2/FashionCLIP.
+  Include? YES
+
+* MOON2.0 (Nie et al., 2025)
+  Successor fixing modality imbalance via modality-driven MoE +
+  dual-level alignment; releases 6.4M-sample MBE2.0 benchmark.
+  Include? YES
+
+* MOON Embedding (Fu et al., Taobao production report)
+  Full 3-stage production deployment of MOON at Taobao search-ads
+  scale; +20% CTR over 3 years/5 iterations.
+  Include? YES
+
+* Multimodal semantic retrieval for product search
+  (Liu & Lopez Ramos, Amazon, WWW '25)
+  4-tower/3-tower CLIP+BiBERT fusion vs. text-only baseline on 3.38M
+  products; FAISS-based retrieval; shows CLIP alone has high relevance
+  but low recall unless aligned to product data.
+  Include? YES
+
+* Turning Adversaries into Allies (Jenq & Shen, CIKM '25)
+  Renders product title/metadata onto the image itself before CLIP
+  encoding ("reversed typographic attack") - consistent Acc@1/Acc@3
+  gains across CLIP/SigLIP/DINO on real e-commerce datasets.
+  Include? YES
+
+--- Moderately relevant - good supporting/contextual citations ---
+
+* Visual Product Search Benchmark (Govindappa, nyris, 2026)
+  Benchmarks CLIP-family, DINOv2/3, SigLIP2, Jina, Cohere embedders on
+  industrial image-to-image instance retrieval; domain-tuned models
+  beat general foundation models.
+  Include? YES, framed narrowly as a retrieval-benchmark reference
+
+* VLM4Rec (Valencia et al., USC course project)
+  Uses LLaVA-NeXT to caption product images into text, then retrieves
+  via Sentence-BERT - beats fusion architectures. Supports MULTIVIEW's
+  LLaVA choice, but unpublished/small-scale.
+  Include? YES, with caveat (course project, not peer-reviewed)
+
+* Zero Shot Composed Image Retrieval (Kakarla & Bulusu Venkata, GMU)
+  Compares zero-shot CLIP vs. BLIP-2+Q-Former vs. failed Retrieval-DPO
+  on FashionIQ; useful cautionary result on fusion vs. naive
+  dual-encoding.
+  Include? YES, supporting citation
+
+* Evaluating UX in Conversational Recommender Systems
+  (Mahmud et al., OZCHI '25)
+  Systematic review of 23 UX studies on CRS; catalogs UEQ/ResQue/SUS
+  instruments; finds LLM-based CRS UX evaluation is immature.
+  Include? YES, for your evaluation-methodology chapter
+
+* Fine-Grained ZS-CIR (CVSI)
+  CLIP + BLIP-2 caption fusion for composed image retrieval (reference
+  image + edit text -> target image). Different task paradigm than
+  MULTIVIEW's search.
+  Include? MAYBE - related-but-distinct paradigm
+
+* Scaling Prompt-Instructed ZS-CIR (InstructCIR)
+  LLaVA-captioned synthetic triplets to train CIR without human
+  annotation; beats prior zero-shot CIR on CIRR/FashionIQ.
+  Include? MAYBE - same reasoning
+
+* Vision-Free Retrieval (LexiCLIP)
+  Converts images to VLLM text descriptions, retrieves in single
+  text-only embedding space to avoid CLIP's modality gap; 0.3B
+  text-only model matches large CLIP models.
+  Include? MAYBE - useful for a limitations/discussion section on
+  CLIP's modality gap
+
+* VLM2Rec (Kim et al., POSTECH)
+  Identifies "modality collapse" when fine-tuning VLMs for sequential
+  recommendation; proposes rebalancing objectives. Different task
+  (session-based ranking) than MULTIVIEW's search.
+  Include? MAYBE - cite briefly re: modality imbalance risk
+
+--- Tangential - text-only / different problem, cite sparingly if at all ---
+
+* A Hybrid Multi-Agent CRS (Nie et al., JD.com, RecSys '24)
+  Single fine-tuned 13B "central agent" replacing 2-LLM conversational
+  recommender pipeline; -70% latency, +8.24% acceptance, +1.7% GMV.
+  Purely text.
+  Include? MAYBE, brief contrast only
+
+* A Survey on LLM-powered Agents for RecSys (Peng et al., EMNLP
+  Findings '25)
+  Taxonomy of LLM-agent recommenders (recommender/interaction/
+  simulation-oriented) + 4-module architecture. Purely text/LLM.
+  Include? MAYBE, contextual framing only
+
+* CRS + LLM in Pre-sales Dialogue (Liu et al.)
+  Tests CRS-assisting-LLM vs. LLM-assisting-CRS collaboration on
+  Chinese e-commerce dialogue dataset. Purely text.
+  Include? NO/MAYBE
+
+* Shopping Companion (Yu et al.)
+  Long-horizon LLM shopping-agent benchmark w/ memory; GPT-5 succeeds
+  <70%. Text-only, explicitly no images.
+  Include? MAYBE, background on LLM shopping agents
+
+* ShopSimulator (Wang et al.)
+  Taobao-based RL shopping-agent sandbox; explicitly notes it's
+  text-only, no images/video, as a stated limitation.
+  Include? MAYBE, same reasoning
+
+* Unified Learning-to-Rank for Multi-Channel Retrieval (Gaydhani et
+  al., Target)
+  GBDT/LambdaMART re-ranking across retrieval channels using
+  behavioral signals only - no embeddings/vision/language.
+  Include? MAYBE, tangential to ranking infra only
+
+* Less is More: Benchmarking LLM Rec Agents
+  Tests whether longer purchase-history context improves LLM
+  recommendation quality - finds it doesn't; text-only, small-scale
+  (50 users).
+  Include? MAYBE
+
+* Enabling Explainable Recommendation w/ LLM Product KG
+  Not fully re-read this pass (large file) - filename/topic suggests
+  text/graph-based explainability with no multimodal component.
+  Include? FLAG FOR MANUAL CHECK
+
+
+3. CROSS-CHECK AGAINST YOUR EXISTING 25-SOURCE LIST
+------------------------------------------------------
+
+Your thesis Chapter 2 lists 25 references. Two issues worth fixing
+before submission:
+
+1. Duplicate entry: reference #7 and #18 are both the CVSI paper
+   (arXiv:2601.14060) - same paper cited twice. Remove one.
+
+2. Table/text mismatch: your comparison table has rows (e.g., "BiLens,"
+   an ASR survey, "Multimodal AI Framework for High-Potential Product
+   Listings," "Short-Form Video Recommendations") that don't have a
+   matching narrative paragraph in the text extracted - worth checking
+   these were actually written up in the body, or if they're leftover
+   table rows from an earlier draft.
+
+3. Your literatures folder is missing a PDF for the IEEE Augmented
+   Furniture AR/3D paper (#9 in your reference list) - likely just
+   needs to be added to the folder for completeness, not a content
+   issue.
+
+
+4. NEW LITERATURE TO CONSIDER ADDING (fills genuine gaps)
+-------------------------------------------------------------
+
+Your review is strong on CLIP/VLM retrieval and LLM shopping agents but
+has NO literature at all on voice+visual fusion, AR-UX evaluation
+methodology, or DSR validity frameworks - despite MULTIVIEW building
+all three. Recommended additions, ranked by fit:
+
+Voice + multimodal search (your biggest literature gap):
+1. MultiVox (Selvakumar et al., 2025, arXiv:2507.10859) - benchmark
+   showing SOTA omni-modal voice assistants fail to jointly reason
+   over speech + visual context. Directly motivates why MULTIVIEW's
+   voice+CLIP/LLaVA fusion is a real, unsolved problem.
+2. Cross-Modal Denoising for Speech-Image Retrieval (Zhou et al.,
+   2024, arXiv:2408.13705) - closest technical precedent for
+   speech-query -> product-image retrieval.
+3. PSCon: Product Search Through Conversations (Zou et al., SIGIR '25,
+   arXiv:2502.13881) - human-collected conversational product-search
+   dataset with 6 subtasks; useful for framing your voice-query
+   pipeline.
+
+AR/3D and conversion:
+4. UX Evaluation of AR: A Systematic Literature Review (Graser et al.,
+   CENTRIC 2024) - finds only 3 standardized AR-UX questionnaires
+   exist, justifying your custom Likert approach.
+5. Virtual try-on and purchase intention (European Journal of
+   Innovation Management, 2025) - empirical n=238 study; AR effect on
+   purchase intention runs through perceived usefulness/value.
+6. AR in e-commerce: dual value/barrier perspective on Gen Z (2025) -
+   balances your AR coverage with adoption barriers, useful for
+   limitations discussion.
+
+Generative fallback imagery:
+- No academic precedent found for Pollinations.ai/Stable-Diffusion-as-
+  retrieval-fallback in retail. Worth stating explicitly in your
+  thesis as a novelty claim rather than an oversight.
+  
+
+DSR methodology (strengthens your methodology chapter):
+7. Artifact Validity in DSR (Kroop, DESRIST 2025, arXiv:2502.11199) -
+   compares 3 DSR frameworks incl. Hevner's across 5 validity
+   dimensions.
+8. Validity in Design Science (Larsen et al., 2025, arXiv:2503.09466)
+   - newer validity framework to triangulate against Hevner.
+9. Holistic Evaluations in DSR (Springer LNBIP, 2025) - 6x10x8 matrix
+   for matching artifact type to evaluation method; gives explicit
+   justification for your CLIP-score + response-time + Likert combo.
+
+Evaluation methodology:
+10. CLIPScore (Hessel et al., EMNLP 2021) - the actual metric origin
+    for "CLIP relevance score" evaluation; should be cited explicitly
+    even though older.
+11. UniECS (Liang et al., CIKM 2025, arXiv:2508.13843) - gated
+    cross-modal fusion handling missing modalities + M-BEER
+    benchmark; architecturally closer to your "unify everything" goal
+    than VLM4Rec/VLM2Rec, deployed at Kuaishou (+2.74% CTR, +8.33%
+    revenue).
+
+Confirmed gap (no new papers found):
+- No 2025-2026 papers reuse Pix3D for retrieval/AR (only the original
+  2018 Sun et al. dataset paper exists) - reinforces that your use of
+  Pix3D for unified retrieval+AR evaluation is genuinely novel.
+
+
+5. BOTTOM LINE
+----------------
+
+- Of the 23 PDFs, 7 are strong, direct fits (Beyond Text, VL-CLIP,
+  MOON/MOON2.0/MOON Embedding, Amazon multimodal retrieval, Turning
+  Adversaries into Allies) - these should anchor your "prior art in
+  multimodal e-commerce retrieval" cluster.
+- ~8 are moderately relevant - good supporting/contextual citations,
+  especially for LLaVA justification and evaluation methodology.
+- ~8 are tangential (pure text-based LLM shopping agents/CRS) - keep
+  these light-touch, since over-citing them dilutes your multimodal
+  argument rather than strengthening it.
+- Your literature review has zero coverage of voice-search research,
+  AR-UX measurement standards, and DSR validity literature - all
+  directly relevant to what you built. Adding 4-6 of the papers in
+  Section 4 would close real gaps rather than pad the count.

@@ -3,11 +3,20 @@
 Thumbs.db
 .vscode/
 .idea/
+docs/
 
 # --- Environment Secrets ---
 .env
 .env.local
 .env*.local
+
+
+# --- Python Virtual Environments ---
+**/venv*/
+**/.venv*/
+.venv*/
+backend/venv/
+
 
 # --- Backend (Python) ---
 backend/__pycache__/

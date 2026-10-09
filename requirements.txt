@@ -13,4 +13,6 @@ openai # if you use the Whisper API
 
 
 venv\Scripts\activate
+.\.venv\Scripts\Activate.ps1
+
 python -m uvicorn main:app --reload --port 8000

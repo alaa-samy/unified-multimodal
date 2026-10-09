@@ -1,9 +1,19 @@
-"""
-Quick Fix: Update the keep_warm parameter and improve image detection
-Replace your modal_app.py with this version
-"""
-import modal
+import io
+import json
+import csv
 import os
+from pathlib import Path
+from typing import Optional, List, Dict, Any
+
+import numpy as np
+import torch
+from fastapi import FastAPI, UploadFile, File, Form
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from PIL import Image as PILImage
+from transformers import CLIPModel, CLIPProcessor
+
+import modal
 
 app = modal.App("furniture-search-api")
 
@@ -17,40 +27,29 @@ image = (
         "torch==2.1.0",
         "transformers==4.35.2",
         "faiss-cpu==1.7.4",
-        "kaggle==1.5.16",
     )
 )
 
 volume = modal.Volume.from_name("furniture-data-cache", create_if_missing=True)
 
+PROJECT_ROOT = Path(__file__).resolve().parent
+CACHE_DIR = "/cache/data"
+
+
 @app.function(
     image=image,
-    secrets=[modal.Secret.from_name("kaggle-secrets")],
     volumes={"/cache": volume},
     memory=2048,
-    timeout=600,  # 10 minutes timeout
-    min_containers=0,  # Keep at least 1 container always running
-    max_containers=3,  # Scale up to 10 if needed
-    container_idle_timeout=60,  # Keep idle containers for 5 minutes
-    allow_concurrent_inputs=100,  # Handle up to 100 concurrent requests
+    timeout=600,
+    min_containers=0,
+    max_containers=3,
+    scaledown_window=60,
 )
+@modal.concurrent(max_inputs=100)
 @modal.asgi_app()
 def serve():
-    import os
-    import json
-    import tempfile
-    from typing import Optional
-    import numpy as np
-    import torch
-    from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-    from fastapi.responses import JSONResponse, FileResponse
-    from fastapi.middleware.cors import CORSMiddleware
-    from PIL import Image as PILImage
-    from transformers import CLIPProcessor, CLIPModel
-    import faiss
-    
     api = FastAPI(title="Furniture Search API")
-    
+
     api.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -58,448 +57,443 @@ def serve():
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
-    # Global state
+
     _clip_model = None
     _clip_processor = None
     _data_loaded = False
-    _products = None
-    _image_index = None
-    _text_index = None
-    _id_map = None
-    _images_dir = None  # Will be set dynamically
-    
-    KAGGLE_DATASET = "alaasamy1/amazon-data2"
-    CACHE_DIR = "/cache/data"
-    
-    def find_images_directory():
-        """Recursively search for images directory"""
-        print("🔍 Searching for images directory...")
-        
-        # Possible locations (including nested paths from zip extraction)
-        possible_paths = [
-            "/cache/images",
-            "/cache/data/images",
-            "/cache/data/images/images",  # ← Nested from zip
-            os.path.join(CACHE_DIR, "images"),
-            os.path.join(CACHE_DIR, "images", "images"),  # ← Nested from zip
+    _products: List[Dict[str, Any]] = []
+    _data_source = "none"
+    _device = "cpu"
+
+    def _get_device() -> str:
+        return "cuda" if torch.cuda.is_available() else "cpu"
+
+    def _build_demo_catalog() -> List[Dict[str, Any]]:
+        return [
+            {
+                "id": "demo-1",
+                "name": "Modern beige sofa",
+                "description": "Comfortable beige sofa for living room furniture with soft cushions",
+                "category": "sofa",
+                "image": None,
+                "has_ar": False,
+                "ar_type": None,
+                "ar_model_url": None,
+            },
+            {
+                "id": "demo-2",
+                "name": "Wooden dining table",
+                "description": "Solid wood dining table for family meals and modern interiors",
+                "category": "table",
+                "image": None,
+                "has_ar": False,
+                "ar_type": None,
+                "ar_model_url": None,
+            },
         ]
-        
-        # Check known paths first
+
+    def _normalize_text(value: Any) -> str:
+        if value is None:
+            return ""
+        return " ".join(str(value).split())
+
+    def _build_product_text(product: Dict[str, Any]) -> str:
+        parts = [
+            product.get("name", ""),
+            product.get("description", ""),
+            product.get("category", ""),
+            product.get("brand", ""),
+            product.get("color", ""),
+            product.get("material", ""),
+        ]
+        return " ".join([_normalize_text(p) for p in parts if _normalize_text(p)])
+
+    def _safe_read_json(path: str) -> Optional[List[Dict[str, Any]]]:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                return [dict(x) for x in data if isinstance(x, dict)]
+            if isinstance(data, dict):
+                if isinstance(data.get("products"), list):
+                    return [dict(x) for x in data["products"] if isinstance(x, dict)]
+                if isinstance(data.get("items"), list):
+                    return [dict(x) for x in data["items"] if isinstance(x, dict)]
+            return None
+        except Exception:
+            return None
+
+    def _safe_read_csv(path: str) -> Optional[List[Dict[str, Any]]]:
+        try:
+            with open(path, "r", encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.DictReader(f))
+            return [dict(r) for r in rows]
+        except Exception:
+            return None
+
+    def _resolve_local_path(path_value: Optional[str]) -> Optional[str]:
+        if not path_value:
+            return None
+
+        raw = str(path_value).strip()
+        if not raw:
+            return None
+
+        candidates = [
+            raw,
+            os.path.join(CACHE_DIR, raw),
+            os.path.join(CACHE_DIR, "data", raw),
+            str(PROJECT_ROOT / raw),
+            str(PROJECT_ROOT / "backend" / "data" / raw),
+        ]
+
+        for candidate in candidates:
+            if os.path.exists(candidate):
+                return candidate
+
+        return None
+
+    def _model_key(path_value: Optional[str]) -> Optional[str]:
+        if not path_value:
+            return None
+
+        p = str(path_value).replace("\\", "/").rstrip("/")
+        if p.endswith("/model.obj") or p.endswith("/model.glb") or p.endswith("/model"):
+            return os.path.basename(os.path.dirname(p)).lower()
+
+        if p.endswith(".obj") or p.endswith(".glb"):
+            p = p[:-4]
+
+        return os.path.basename(p).lower()
+
+    def _load_pix3d_index() -> Dict[str, Dict[str, Any]]:
+        possible_paths = [
+            str(PROJECT_ROOT / "backend" / "data" / "pix3d" / "pix3d.json"),
+            str(PROJECT_ROOT / "backend" / "data" / "pix3d.json"),
+            os.path.join(CACHE_DIR, "pix3d", "pix3d.json"),
+            os.path.join(CACHE_DIR, "data", "pix3d", "pix3d.json"),
+            os.path.join(CACHE_DIR, "pix3d.json"),
+            os.path.join(CACHE_DIR, "data", "pix3d.json"),
+        ]
+
         for path in possible_paths:
             if os.path.exists(path):
-                # Verify it has subdirectories with images
                 try:
-                    subdirs = [d for d in os.listdir(path) 
-                              if os.path.isdir(os.path.join(path, d))]
-                    # Check if subdirs contain actual image files
-                    has_images = False
-                    for subdir in subdirs[:3]:  # Check first 3 subdirs
-                        subdir_path = os.path.join(path, subdir)
-                        files = os.listdir(subdir_path)
-                        if any(f.endswith(('.jpg', '.jpeg', '.png')) for f in files):
-                            has_images = True
-                            break
-                    
-                    if has_images:
-                        print(f"✅ Found images at: {path}")
-                        print(f"   Categories: {subdirs[:5]}")
-                        return path
-                except:
+                    with open(path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, list):
+                        index = {}
+                        for item in data:
+                            if isinstance(item, dict):
+                                key = _model_key(item.get("model"))
+                                if key:
+                                    index[key] = item
+                        return index
+                except Exception:
                     continue
-        
-        # Search recursively
-        print(f"🔍 Searching recursively in {CACHE_DIR}...")
-        for root, dirs, files in os.walk(CACHE_DIR):
-            if 'images' in dirs:
-                images_path = os.path.join(root, 'images')
-                # Verify it has subdirectories with images
-                try:
-                    subdirs = [d for d in os.listdir(images_path) 
-                              if os.path.isdir(os.path.join(images_path, d))]
-                    if subdirs:
-                        # Check if subdirs actually contain images
-                        for subdir in subdirs[:3]:
-                            subdir_path = os.path.join(images_path, subdir)
-                            files = os.listdir(subdir_path)
-                            if any(f.endswith(('.jpg', '.jpeg', '.png')) for f in files):
-                                print(f"✅ Found images directory: {images_path}")
-                                print(f"   Categories: {subdirs[:5]}")
-                                return images_path
-                except:
+
+        return {}
+
+    def _load_clean_products_catalog() -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+        possible_paths = [
+            str(PROJECT_ROOT / "backend" / "data" / "clean_products.json"),
+            os.path.join(CACHE_DIR, "clean_products.json"),
+            os.path.join(CACHE_DIR, "data", "clean_products.json"),
+        ]
+
+        for path in possible_paths:
+            if os.path.exists(path):
+                data = _safe_read_json(path)
+                if data:
+                    return data, path
+
+        return None, None
+
+    def _find_catalog_files() -> List[str]:
+        candidates = []
+
+        for path in [
+            str(PROJECT_ROOT / "backend" / "data" / "clean_products.json"),
+            str(PROJECT_ROOT / "backend" / "data" / "products.json"),
+            str(PROJECT_ROOT / "backend" / "data" / "catalog.json"),
+            "/cache/data/catalog.json",
+            "/cache/data/products.json",
+            "/cache/data/data/catalog.json",
+            "/cache/data/data/products.json",
+            os.path.join(CACHE_DIR, "catalog.json"),
+            os.path.join(CACHE_DIR, "products.json"),
+            os.path.join(CACHE_DIR, "data", "catalog.json"),
+            os.path.join(CACHE_DIR, "data", "products.json"),
+        ]:
+            if os.path.exists(path):
+                candidates.append(path)
+
+        if candidates:
+            return candidates
+
+        for root, _, files in os.walk(CACHE_DIR):
+            for name in files:
+                if name.lower().endswith((".json", ".csv")):
+                    candidates.append(os.path.join(root, name))
+        return candidates
+
+    def _load_catalog() -> tuple[List[Dict[str, Any]], str]:
+        cleaned, cleaned_path = _load_clean_products_catalog()
+        if cleaned:
+            pix3d_index = _load_pix3d_index()
+
+            normalized = []
+            for idx, product in enumerate(cleaned):
+                if not isinstance(product, dict):
                     continue
-        
-        print("❌ No images directory found!")
-        return None
-    
-    def download_entire_dataset():
-        """Download complete dataset from Kaggle"""
-        try:
-            from kaggle.api.kaggle_api_extended import KaggleApi
-            kaggle_api = KaggleApi()
-            kaggle_api.authenticate()
-            
-            print(f"📥 Downloading entire dataset from Kaggle...")
-            kaggle_api.dataset_download_files(
-                dataset=KAGGLE_DATASET,
-                path=CACHE_DIR,
-                unzip=True
-            )
-            
-            print(f"✅ Dataset downloaded!")
-            
-            # Show what was downloaded
-            print("\n📂 Downloaded contents:")
-            items = os.listdir(CACHE_DIR)
-            for item in items[:20]:
-                item_path = os.path.join(CACHE_DIR, item)
-                if os.path.isdir(item_path):
-                    print(f"   📁 {item}/")
-                else:
-                    size_mb = os.path.getsize(item_path) / (1024 * 1024)
-                    print(f"   📄 {item} ({size_mb:.2f} MB)")
-            
-            return True
-            
-        except Exception as e:
-            print(f"❌ Download failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
-    def initialize_data():
-        nonlocal _data_loaded, _products, _image_index, _text_index, _id_map, _images_dir
-        
-        if _data_loaded:
-            return True
-        
-        print("\n" + "="*60)
-        print("🚀 Initializing data...")
-        print("="*60)
-        
-        try:
-            # Download dataset if not exists
-            products_path = os.path.join(CACHE_DIR, "clean_products.json")
-            if not os.path.exists(products_path):
-                print("📦 Dataset not cached, downloading...")
-                if not download_entire_dataset():
-                    return False
-            
-            # Find images directory
-            _images_dir = find_images_directory()
-            
-            if _images_dir is None:
-                print("\n⚠️ WARNING: Images not found!")
-                print("   The API will work but won't serve images.")
-                print("   Please ensure your Kaggle dataset includes 'images/' folder")
-            
-            # Load products
-            print(f"\n📦 Loading products from: {products_path}")
-            with open(products_path, "r", encoding="utf-8") as f:
-                products_list = json.load(f)
-                _products = {int(p["id"]): p for p in products_list}
-            print(f"✅ Loaded {len(_products)} products")
-            
-            # Load FAISS indexes
-            print("\n📊 Loading FAISS indexes...")
-            _image_index = faiss.read_index(os.path.join(CACHE_DIR, "image_index.faiss"))
-            _text_index = faiss.read_index(os.path.join(CACHE_DIR, "text_index.faiss"))
-            _id_map = np.load(os.path.join(CACHE_DIR, "id_map.npy"))
-            
-            print(f"✅ Image index: {_image_index.ntotal} vectors")
-            print(f"✅ Text index: {_text_index.ntotal} vectors")
-            print(f"✅ ID map: {len(_id_map)} IDs")
-            
-            _data_loaded = True
-            print("\n✅ Initialization complete!")
-            return True
-            
-        except Exception as e:
-            print(f"\n❌ Initialization failed: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
-    
+
+                name = (
+                    product.get("productDisplayName")
+                    or product.get("name")
+                    or product.get("title")
+                    or f"Product {idx}"
+                )
+                category = (
+                    product.get("subCategory")
+                    or product.get("category")
+                    or product.get("masterCategory")
+                    or "Furniture"
+                )
+                description_parts = [
+                    product.get("masterCategory"),
+                    product.get("subCategory"),
+                    product.get("baseColour"),
+                    product.get("description"),
+                ]
+                description = " ".join(
+                    [_normalize_text(p) for p in description_parts if _normalize_text(p)]
+                )
+
+                image_path = product.get("image_path") or product.get("image") or product.get("image_url")
+                resolved_image = _resolve_local_path(image_path)
+
+                has_ar = bool(product.get("has_3d_model"))
+                ar_model = product.get("glb_path") or product.get("ar_model_url") or product.get("ar_model_path")
+
+                ar_payload = {
+                    "has_ar": has_ar,
+                    "ar_type": "model" if has_ar else None,
+                    "ar_model_url": ar_model,
+                }
+
+                pix3d_match = None
+                if ar_model:
+                    pix3d_match = pix3d_index.get(_model_key(ar_model), {})
+
+                normalized.append(
+                    {
+                        "id": product.get("id", idx),
+                        "name": name,
+                        "description": description,
+                        "category": category,
+                        "brand": product.get("brand", ""),
+                        "color": product.get("baseColour") or product.get("color", ""),
+                        "material": product.get("material", ""),
+                        "image": resolved_image,
+                        "image_path": resolved_image,
+                        "image_url": image_path,
+                        "has_ar": ar_payload["has_ar"],
+                        "ar_type": ar_payload["ar_type"],
+                        "ar_model_url": ar_payload["ar_model_url"],
+                        "pix3d_image": pix3d_match.get("img") if isinstance(pix3d_match, dict) else None,
+                        "pix3d_category": pix3d_match.get("category") if isinstance(pix3d_match, dict) else None,
+                    }
+                )
+
+            return normalized, cleaned_path
+
+        catalog_files = _find_catalog_files()
+        for path in catalog_files:
+            if path.lower().endswith(".json"):
+                data = _safe_read_json(path)
+                if data:
+                    return data, path
+            elif path.lower().endswith(".csv"):
+                data = _safe_read_csv(path)
+                if data:
+                    return data, path
+
+        return _build_demo_catalog(), "demo-catalog"
+
     def initialize_clip():
+        nonlocal _clip_model, _clip_processor, _device
+        if _clip_model is not None and _clip_processor is not None:
+            return
+        _device = _get_device()
+        print(f"Loading CLIP on {_device}...")
+        _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        _clip_model.to(_device)
+        _clip_model.eval()
+
+    def initialize_data():
+        nonlocal _products, _data_loaded, _data_source
+        if _data_loaded:
+            return
+
+        print("Initializing product catalog...")
+        products, source = _load_catalog()
+
+        initialize_clip()
+
+        for product in products:
+            product["text"] = _build_product_text(product)
+            product["text_embedding"] = _embed_text(product["text"])
+
+            image_path = product.get("image") or product.get("image_path") or product.get("image_url")
+            if image_path and os.path.exists(str(image_path)):
+                product["image_embedding"] = _embed_image_from_path(str(image_path))
+            else:
+                product["image_embedding"] = None
+
+        _products = products
+        _data_source = source
+        _data_loaded = True
+        print(f"Catalog loaded: {len(_products)} products from {_data_source}")
+
+    def _embed_text(text: str):
         nonlocal _clip_model, _clip_processor
-        
-        if _clip_model is not None:
-            return True
-        
+        if _clip_model is None or _clip_processor is None:
+            initialize_clip()
+
+        inputs = _clip_processor(text=[text], return_tensors="pt", padding=True)
+        with torch.inference_mode():
+            embedding = _clip_model.get_text_features(**inputs)
+        embedding = embedding[0].cpu().numpy().astype(np.float32)
+        norm = float(np.linalg.norm(embedding))
+        if norm > 1e-12:
+            embedding = embedding / norm
+        return embedding
+
+    def _embed_image_bytes(image_bytes: bytes):
+        nonlocal _clip_model, _clip_processor
+        if _clip_model is None or _clip_processor is None:
+            initialize_clip()
+
         try:
-            print("\n🔧 Loading CLIP model...")
-            device = torch.device("cpu")
-            _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(device)
-            _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
-            _clip_model.eval()
-            print("✅ CLIP loaded")
-            return True
-        except Exception as e:
-            print(f"❌ CLIP failed: {e}")
-            return False
-    
-    def search_with_embedding(embedding, index, top_k=20):
-        distances, indices = index.search(embedding, top_k * 3)
-        results = []
-        
-        for dist, idx in zip(distances[0], indices[0]):
-            if idx < 0:
-                continue
-            
-            product_id = int(_id_map[int(idx)])
-            product = _products.get(product_id)
-            if not product:
-                continue
-            
-            score = float((dist + 1.0) / 2.0)
-            
-            results.append({
-                "id": product_id,
-                "name": product.get("productDisplayName", ""),
-                "category": product.get("masterCategory", ""),
-                "subCategory": product.get("subCategory", ""),
-                "image": product.get("image_path", ""),
-                "color": product.get("color", product.get("baseColour", "")),
-                "score": score,
-                "has_3d_model": product.get("has_3d_model", False)
-            })
-            
-            if len(results) >= top_k * 2:
-                break
-        
-        return sorted(results, key=lambda x: x["score"], reverse=True)[:top_k]
-    
-    # ========================================
-    # ENDPOINTS
-    # ========================================
-    
+            image = PILImage.open(io.BytesIO(image_bytes)).convert("RGB")
+            inputs = _clip_processor(images=image, return_tensors="pt")
+            with torch.inference_mode():
+                embedding = _clip_model.get_image_features(**inputs)
+            embedding = embedding[0].cpu().numpy().astype(np.float32)
+            norm = float(np.linalg.norm(embedding))
+            if norm > 1e-12:
+                embedding = embedding / norm
+            return embedding
+        except Exception:
+            return None
+
+    def _embed_image_from_path(path: str):
+        if not path or not os.path.exists(path):
+            return None
+        try:
+            with open(path, "rb") as f:
+                return _embed_image_bytes(f.read())
+        except Exception:
+            return None
+
+    def _cosine_similarity(a: Optional[np.ndarray], b: Optional[np.ndarray]) -> float:
+        if a is None or b is None:
+            return 0.0
+        na = float(np.linalg.norm(a))
+        nb = float(np.linalg.norm(b))
+        if na < 1e-12 or nb < 1e-12:
+            return 0.0
+        return float(np.dot(a, b) / (na * nb))
+
+    def search_products(query: str, image_bytes: Optional[bytes] = None, top_k: int = 10) -> List[Dict[str, Any]]:
+        initialize_data()
+        if not _products:
+            return []
+
+        query = (query or "").strip() or "furniture product"
+        query_text_embedding = _embed_text(query)
+        query_image_embedding = _embed_image_bytes(image_bytes) if image_bytes else None
+
+        scored = []
+        for product in _products:
+            text_score = _cosine_similarity(query_text_embedding, product.get("text_embedding"))
+            image_score = 0.0
+            if query_image_embedding is not None and product.get("image_embedding") is not None:
+                image_score = _cosine_similarity(query_image_embedding, product.get("image_embedding"))
+
+            if query_image_embedding is not None:
+                final_score = 0.7 * text_score + 0.3 * image_score
+            else:
+                final_score = text_score
+
+            scored.append(
+                {
+                    "id": product.get("id", ""),
+                    "name": product.get("name", ""),
+                    "description": product.get("description", ""),
+                    "category": product.get("category", ""),
+                    "score": round(float(final_score), 4),
+                    "has_ar": bool(product.get("has_ar")),
+                    "ar_type": product.get("ar_type"),
+                    "ar_model_url": product.get("ar_model_url"),
+                    "pix3d_image": product.get("pix3d_image"),
+                    "pix3d_category": product.get("pix3d_category"),
+                }
+            )
+
+        scored.sort(key=lambda item: item["score"], reverse=True)
+        return scored[: max(1, min(int(top_k), 20))]
+
     @api.get("/")
     def root():
-        """Root endpoint with system status"""
-        try:
-            return {
-                "message": "Furniture Search API",
-                "status": "online",
-                "version": "1.0.0",
-                "timestamp": __import__('datetime').datetime.now().isoformat(),
-                "system": {
-                    "data_loaded": _data_loaded,
-                    "clip_loaded": _clip_model is not None,
-                    "images_available": _images_dir is not None,
-                    "images_path": _images_dir,
-                    "products_count": len(_products) if _products else 0
-                },
-                "endpoints": {
-                    "search": "/search/intelligent (POST)",
-                    "health": "/health (GET)",
-                    "test": "/test-image (GET)",
-                    "images": "/static/{image_path} (GET)"
-                }
-            }
-        except Exception as e:
-            return {
-                "message": "API running but not fully initialized",
-                "status": "starting",
-                "error": str(e)
-            }
-    
+        return {"message": "Furniture search API is running"}
+
     @api.get("/health")
     def health():
-        """Health check for monitoring"""
+        initialize_data()
         return {
-            "status": "healthy" if _data_loaded else "initializing",
-            "data_initialized": _data_loaded,
-            "model_initialized": _clip_model is not None,
-            "images_ready": _images_dir is not None,
-            "timestamp": __import__('datetime').datetime.now().isoformat()
+            "status": "ok",
+            "catalog_size": len(_products),
+            "data_source": _data_source,
         }
-    
+
     @api.get("/wake-up")
     def wake_up():
-        """Endpoint to wake up and initialize the service"""
-        if not _data_loaded:
-            print("🔄 Wake-up call received, initializing...")
-            initialize_data()
-        if _clip_model is None:
-            initialize_clip()
-        
-        return {
-            "message": "Service is awake and ready",
-            "data_loaded": _data_loaded,
-            "clip_loaded": _clip_model is not None,
-            "images_ready": _images_dir is not None
-        }
-    
-    @api.get("/test-image")
-    def test_image():
-        if not _data_loaded:
-            initialize_data()
-        
-        response = {
-            "images_dir": _images_dir,
-            "images_found": _images_dir is not None,
-            "cache_structure": {},
-            "sample_product": None
-        }
-        
-        # Show cache structure
-        if os.path.exists(CACHE_DIR):
-            items = os.listdir(CACHE_DIR)
-            response["cache_structure"] = {
-                "path": CACHE_DIR,
-                "contents": items[:20],
-                "subdirs": [d for d in items if os.path.isdir(os.path.join(CACHE_DIR, d))]
-            }
-        
-        # Show images structure
-        if _images_dir and os.path.exists(_images_dir):
-            subdirs = [d for d in os.listdir(_images_dir) 
-                      if os.path.isdir(os.path.join(_images_dir, d))]
-            response["images_structure"] = {
-                "path": _images_dir,
-                "categories": subdirs,
-                "sample_images": []
-            }
-            
-            # Get sample images
-            if subdirs:
-                first_cat = subdirs[0]
-                cat_path = os.path.join(_images_dir, first_cat)
-                samples = os.listdir(cat_path)[:3]
-                response["images_structure"]["sample_images"] = [
-                    f"{first_cat}/{img}" for img in samples
-                ]
-        
-        # Show sample product
-        if _products:
-            first = list(_products.values())[0]
-            image_path = first.get("image_path", "")
-            full_path = os.path.join(_images_dir, image_path) if _images_dir else None
-            
-            response["sample_product"] = {
-                "id": first.get("id"),
-                "name": first.get("productDisplayName"),
-                "image_path": image_path,
-                "full_image_path": full_path,
-                "image_exists": os.path.exists(full_path) if full_path else False
-            }
-        
-        return response
-    
-    @api.get("/static/{image_path:path}")
-    async def serve_image(image_path: str):
-        if not _data_loaded:
-            initialize_data()
-        
-        if _images_dir is None:
-            raise HTTPException(
-                status_code=503, 
-                detail="Images not available. Please upload images/ folder to Kaggle dataset."
-            )
-        
-        full_path = os.path.join(_images_dir, image_path)
-        
-        if not os.path.exists(full_path):
-            raise HTTPException(
-                status_code=404, 
-                detail=f"Image not found: {image_path}"
-            )
-        
-        return FileResponse(
-            full_path,
-            media_type="image/jpeg",
-            headers={
-                "Cache-Control": "public, max-age=31536000",
-                "Access-Control-Allow-Origin": "*"
-            }
-        )
-    
+        initialize_data()
+        return {"status": "waking-up"}
+
+    @api.post("/search/text")
+    def search_text(query: str = Form(...), top_k: int = Form(10)):
+        try:
+            top_k_value = max(1, min(int(top_k), 20))
+            results = search_products(query=query, top_k=top_k_value)
+            return JSONResponse(content={"query": query, "results": results, "data_source": _data_source})
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+
     @api.post("/search/intelligent")
     async def intelligent_search(
         query: str = Form(""),
-        image: UploadFile = File(None),
-        top_k: int = Form(10)
+        image: Optional[UploadFile] = File(None),
+        top_k: int = Form(10),
     ):
         try:
-            if not _data_loaded:
-                if not initialize_data():
-                    return JSONResponse(
-                        status_code=500,
-                        content={"error": "Failed to initialize"}
-                    )
-            
-            if _clip_model is None:
-                if not initialize_clip():
-                    return JSONResponse(
-                        status_code=500,
-                        content={"error": "Failed to load CLIP"}
-                    )
-            
-            modality_embeddings = []
-            device = torch.device("cpu")
-            
-            # Process IMAGE
-            if image:
-                tmp_img = tempfile.NamedTemporaryFile(delete=False, suffix=".jpg")
-                tmp_img.write(await image.read())
-                tmp_img.close()
-                
-                try:
-                    with torch.no_grad():
-                        pil_img = PILImage.open(tmp_img.name).convert("RGB")
-                        img_inputs = _clip_processor(images=pil_img, return_tensors="pt").to(device)
-                        img_emb = _clip_model.get_image_features(**img_inputs)
-                        img_emb = img_emb.cpu().numpy()
-                        img_emb /= np.linalg.norm(img_emb, axis=1, keepdims=True)
-                    modality_embeddings.append(img_emb[0])
-                finally:
-                    os.remove(tmp_img.name)
-            
-            # Process TEXT
-            if query.strip():
-                with torch.no_grad():
-                    txt_inputs = _clip_processor(
-                        text=[query], 
-                        return_tensors="pt", 
-                        padding=True, 
-                        truncation=True, 
-                        max_length=77
-                    ).to(device)
-                    txt_emb = _clip_model.get_text_features(**txt_inputs)
-                    txt_emb = txt_emb.cpu().numpy()
-                    txt_emb /= np.linalg.norm(txt_emb, axis=1, keepdims=True)
-                modality_embeddings.append(txt_emb[0])
-            
-            if not modality_embeddings:
-                return JSONResponse(
-                    status_code=400,
-                    content={"error": "No input provided"}
-                )
-            
-            # Combine and search
-            final_embedding = np.mean(modality_embeddings, axis=0, keepdims=True)
-            final_embedding /= np.linalg.norm(final_embedding, axis=1, keepdims=True)
-            final_embedding = final_embedding.astype("float32")
-            
-            search_index = _image_index if (image and not query) else _text_index
-            results = search_with_embedding(final_embedding, search_index, top_k)
-            
-            return {
-                "query": query,
-                "interpreted_query": query,
-                "accurate_results": results,
-                "related_results": [],
-                "total_results": len(results),
-                "images_available": _images_dir is not None
-            }
-            
-        except Exception as e:
-            print(f"❌ Search error: {e}")
-            import traceback
-            traceback.print_exc()
+            image_bytes = None
+            if image is not None:
+                image_bytes = await image.read()
+
+            top_k_value = max(1, min(int(top_k), 20))
+            results = search_products(query=query, image_bytes=image_bytes, top_k=top_k_value)
             return JSONResponse(
-                status_code=500,
-                content={"error": str(e)}
+                content={
+                    "query": query,
+                    "results": results,
+                    "data_source": _data_source,
+                    "image_received": image is not None,
+                }
             )
-    
+        except Exception as exc:
+            return JSONResponse(status_code=500, content={"error": str(exc)})
+
     return api

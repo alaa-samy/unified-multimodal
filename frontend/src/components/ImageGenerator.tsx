@@ -19,26 +19,33 @@ export function ImageGenerator({ onGenerateComplete, onCancel }: ImageGeneratorP
     
     setLoading(true);
     setError(null);
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
     
     try {
       const form = new FormData();
       form.append("prompt", prompt);
       
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
       const res = await fetch(`${apiUrl}/generate_image`, {
         method: "POST",
         body: form,
       });
       
       if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.detail || `Backend error ${res.status}`);
+        const data = await res.json().catch(() => null);
+        const detail = typeof data?.detail === "string" && data.detail.trim() ? data.detail.trim() : `Backend error ${res.status}`;
+        throw new Error(detail);
       }
       
       const data = await res.json();
-      onGenerateComplete(data.image_url, prompt);
-    } catch (err: any) {
-      setError(err.message || "Failed to generate image.");
+      if (typeof data?.image_url !== "string" || !data.image_url.trim()) {
+        throw new Error("The image service returned no image. Please try again.");
+      }
+      onGenerateComplete(data.image_url, prompt.trim());
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Unknown error";
+      setError(message.toLowerCase().includes("failed to fetch")
+        ? `I can't reach the search server at ${apiUrl}. Please check that the backend is running.`
+        : message);
     } finally {
       setLoading(false);
     }
