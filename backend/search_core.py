@@ -13,6 +13,12 @@ What changed vs. the old main.py
      Pix3D labels are reliable. For image queries the category is inferred from
      the nearest neighbours and applied as a soft boost.
   5. Whole-word color matching (the old code matched "tan" inside "standing").
+  6. NEW: material (leather, velvet, wood...) and pattern (printed, striped,
+     floral...) extraction. The catalog has no such labels, so these are NOT
+     filters - they travel inside the CLIP text embedding and the caller raises
+     the text weight (alpha) so they actually influence the ranking. This closes
+     the gap where "black leather sofa with printed pattern" degraded to just
+     "black sofa".
 """
 import re
 import difflib
@@ -66,15 +72,43 @@ CATEGORY_SYNONYMS = {
 }
 _SYN2CAT = {s: c for c, syns in CATEGORY_SYNONYMS.items() for s in syns}
 
+# ------------------------------------------------------------------ materials (NEW)
+# Canonical material name -> surface forms. Used for extraction only; there are
+# no material labels in the catalog, so the words stay in the CLIP text query.
+MATERIAL_SYNONYMS = {
+    "leather": ["leather", "leatherette", "vinyl"],
+    "fabric":   ["fabric", "cloth", "textile", "linen", "cotton", "canvas"],
+    "velvet":   ["velvet", "velour", "plush"],
+    "wood":     ["wood", "wooden", "oak", "walnut", "teak", "pine"],
+    "metal":    ["metal", "metallic", "steel", "iron", "aluminum", "aluminium",
+                 "chrome", "brass"],
+    "glass":    ["glass"],
+    "rattan":   ["rattan", "wicker", "cane"],
+}
+_MAT2NAME = {s: c for c, syns in MATERIAL_SYNONYMS.items() for s in syns}
+
+# ------------------------------------------------------------------ patterns (NEW)
+PATTERN_SYNONYMS = {
+    "printed":  ["printed", "printted", "print", "patterned", "pattern",
+                 "floral", "flower", "flowers", "botanical", "motif"],
+    "striped":  ["striped", "stripes", "stripe"],
+    "plaid":    ["plaid", "checked", "checkered", "tartan"],
+    "solid":    ["solid", "plain"],
+}
+_PAT2NAME = {s: c for c, syns in PATTERN_SYNONYMS.items() for s in syns}
+
 # ------------------------------------------------------------------ text helpers
-_VOCAB = sorted(set(_SYN2CAT) | set(_ALIAS2COLOR))
+_VOCAB = sorted(set(_SYN2CAT) | set(_ALIAS2COLOR) | set(_MAT2NAME) | set(_PAT2NAME))
 _NO_CORRECT = {"read", "reed", "wood", "would", "board", "tablet", "stable",
                "cable", "label", "bead", "teak", "oak", "wide", "wine", "while",
                "whole", "write", "wire", "brow", "rows", "tall", "tell"}
 _TYPOS = {"sopha": "sofa", "soaf": "sofa", "coatch": "couch", "wardope": "wardrobe",
           "wardorbe": "wardrobe", "wardrop": "wardrobe", "wardobe": "wardrobe",
           "cahir": "chair", "chiar": "chair", "tabel": "table", "lmap": "lamp",
-          "shef": "shelf", "cabnet": "cabinet", "bokcase": "bookcase"}
+          "shef": "shelf", "cabnet": "cabinet", "bokcase": "bookcase",
+          # NEW: common material/pattern typos
+          "printted": "printed", "printtedd": "printed", "pattrn": "pattern",
+          "leather": "leather", "lather": "leather", "velwet": "velvet"}
 
 
 def _words(text: str) -> List[str]:
@@ -90,7 +124,7 @@ def _singular(w: str) -> str:
 
 
 def correct_spelling(text: str) -> str:
-    """Fuzzy-fix misspelled furniture/color words ('wardope'->'wardrobe')."""
+    """Fuzzy-fix misspelled furniture/color/material/pattern words."""
     def repl(m):
         raw, w = m.group(), m.group().lower()
         if w in _TYPOS:
@@ -115,6 +149,22 @@ def extract_category(text: str) -> Optional[str]:
         w = _singular(w)
         if w in _SYN2CAT:
             return _SYN2CAT[w]
+    return None
+
+
+def extract_material(text: str) -> Optional[str]:
+    """NEW: 'black leather sofa' -> 'leather'. None if no material word."""
+    for w in _words(text):
+        if w in _MAT2NAME:
+            return _MAT2NAME[w]
+    return None
+
+
+def extract_pattern(text: str) -> Optional[str]:
+    """NEW: 'sofa with printted pattern' -> 'printed'. None if no pattern word."""
+    for w in _words(text):
+        if w in _PAT2NAME:
+            return _PAT2NAME[w]
     return None
 
 

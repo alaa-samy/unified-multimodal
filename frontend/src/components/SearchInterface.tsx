@@ -31,7 +31,7 @@ interface ChatMessage {
   type: "user" | "ai" | "results";
   text?: string;
   hasImage?: boolean;
-  imagePreview?: string;
+  imagePreviews?: string[];   // CHANGED: single preview -> array of previews
   voiceQuery?: string;
   voiceError?: string;
   voiceRejectedText?: string;
@@ -39,6 +39,8 @@ interface ChatMessage {
   animate?: boolean;
   results?: any[];
   color?: string | null;
+  material?: string | null;   // NEW: leather / velvet / wood ...
+  pattern?: string | null;    // NEW: printed / striped / floral ...
   mode?: string;
   lowConfidence?: boolean;
   totalResults?: number;
@@ -112,24 +114,19 @@ function generateAISummary(data: {
   totalResults: number;
   lowConfidence: boolean;
   colorFilter: unknown;
-  categoryFilter: unknown;
-  correctedQuery: unknown;
   fallbackTier: unknown;
   hasImage: boolean;
 }): string {
   const query = safeChatValue(data.query);
-  const voiceQuery = safeChatValue(data.voiceQuery) || safeChatValue(data.voiceText);
+  const voiceQuery = safeChatValue(data.voiceText) || safeChatValue(data.voiceQuery);
   const voiceError = safeChatValue(data.voiceError);
   const rejectedText = safeChatValue(data.voiceRejectedText);
   const color = safeChatValue(data.colorFilter);
-  const category = safeChatValue(data.categoryFilter);
-  const corrected = safeChatValue(data.correctedQuery);
   const fallbackTier = safeChatValue(data.fallbackTier);
-  const originalQuery = voiceQuery || query || (data.hasImage ? "your photo" : "your search");
-  const displayQuery = corrected || originalQuery;
+  const originalQuery = [query, voiceQuery].filter(Boolean).join(" ") || (data.hasImage ? "your photo" : "your search");
+  const displayQuery = originalQuery;
   const count = Number.isFinite(data.totalResults) ? data.totalResults : data.results.length;
   const description = displayQuery === "your photo" ? "your photo" : `"${displayQuery}"`;
-  const wasCorrected = corrected && corrected.toLowerCase() !== originalQuery.toLowerCase();
 
   let summary: string;
   if (data.lowConfidence && count > 0) {
@@ -141,10 +138,9 @@ function generateAISummary(data: {
   } else if (count === 0) {
     summary = `I couldn't find any matches for ${description}. Try changing the color or rephrasing your search.`;
   } else {
-    summary = `I searched for ${description} and found ${count} closest visual matches${color && category ? ` for ${color} ${category}s` : ""}.`;
+    summary = `Here are ${count} closest visual matches for ${description}.`;
   }
 
-  if (wasCorrected) summary = `I read that as "${corrected}". ${summary}`;
   if (voiceError || rejectedText) {
     const voiceNote = voiceError || `I heard "${rejectedText}", but couldn't use that voice input`;
     summary = `${summary.replace(/[.!?]$/, "")}. ${voiceNote}.`;
@@ -157,14 +153,14 @@ function generateAISummary(data: {
 function UserBubble({
   text,
   hasImage,
-  imagePreview,
+  imagePreviews,
   voiceQuery,
   voiceError,
   voiceRejectedText,
 }: {
   text?: string;
   hasImage?: boolean;
-  imagePreview?: string;
+  imagePreviews?: string[];
   voiceQuery?: string;
   voiceError?: string;
   voiceRejectedText?: string;
@@ -174,16 +170,19 @@ function UserBubble({
       <div className="max-w-sm w-full">
         <div className="bg-gradient-to-br from-violet-600 to-indigo-600 text-white rounded-2xl rounded-tr-none px-4 py-3 shadow text-sm leading-relaxed">
           {safeChatValue(text) && <p>{safeChatValue(text)}</p>}
-          {imagePreview && (
-            <div className="mt-2">
-              <img
-                src={imagePreview}
-                alt="Attached"
-                className="rounded-xl max-h-48 max-w-full object-cover border-2 border-white/30"
-              />
+          {imagePreviews && imagePreviews.length > 0 && (
+            <div className="mt-2 grid grid-cols-2 gap-2">
+              {imagePreviews.map((src, i) => (
+                <img
+                  key={i}
+                  src={src}
+                  alt={`Attached ${i + 1}`}
+                  className="rounded-xl max-h-48 max-w-full object-cover border-2 border-white/30"
+                />
+              ))}
             </div>
           )}
-          {hasImage && !imagePreview && (
+          {hasImage && (!imagePreviews || imagePreviews.length === 0) && (
             <p className="opacity-75 text-xs mt-1">📷 Image attached</p>
           )}
           {voiceQuery && (
@@ -258,36 +257,43 @@ export default function SearchInterface() {
 
   async function handleSearch(data: {
     query: string;
-    image: File | null;
+    image?: File | null;
+    images?: File[];
     voiceText: string;
   }) {
     const query = safeChatValue(data.query);
     const voiceText = safeChatValue(data.voiceText);
-    const image = data.image;
-    if (!query && !image && !voiceText) return;
+    const images = Array.isArray(data.images)
+      ? data.images
+      : data.image ? [data.image] : [];
+    if (!query && images.length === 0 && !voiceText) return;
 
     setLoading(true);
     const startTime = Date.now();
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
-    let imagePreview: string | undefined;
-    if (image) {
-      try {
-        imagePreview = await new Promise<string>((res) => {
-          const r = new FileReader();
-          r.onload = (e) => res(e.target?.result as string);
-          r.readAsDataURL(image);
-        });
-      } catch {
-        /* ignore */
-      }
-    }
+    // CHANGED: build a preview for every attached image
+    const imagePreviews: string[] = [];
+    await Promise.all(
+      images.map(
+        (img) =>
+          new Promise<void>((res) => {
+            const r = new FileReader();
+            r.onload = (e) => {
+              if (e.target?.result) imagePreviews.push(e.target.result as string);
+              res();
+            };
+            r.onerror = () => res();
+            r.readAsDataURL(img);
+          })
+      )
+    );
 
     push({
       type: "user",
       text: query,
-      hasImage: !!image,
-      imagePreview,
+      hasImage: images.length > 0,
+      imagePreviews,
       voiceQuery: voiceText,
     });
     push({ type: "ai", thinking: true });
@@ -300,7 +306,8 @@ export default function SearchInterface() {
       form.append("top_k", "20");
       form.append("query", query || "");
       form.append("session_id", sessionId);
-      if (image) form.append("file", image);
+      // CHANGED: append EVERY image under the repeated "files" field
+      images.forEach((img) => form.append("files", img));
       if (voiceText) form.append("voice_text", voiceText);
 
       const res = await fetch(`${apiUrl}/search/intelligent`, {
@@ -343,10 +350,8 @@ export default function SearchInterface() {
         totalResults,
         lowConfidence,
         colorFilter: d?.color_filter,
-        categoryFilter: d?.category_filter,
-        correctedQuery: d?.corrected_query,
         fallbackTier: d?.fallback_tier,
-        hasImage: !!imagePreview,
+        hasImage: imagePreviews.length > 0,
       });
 
       patch({
@@ -360,6 +365,8 @@ export default function SearchInterface() {
           type: "results",
           results,
           color: colorFilter,
+          material: safeChatValue(d?.material_filter) || null,   // NEW
+          pattern: safeChatValue(d?.pattern_filter) || null,     // NEW
           mode: searchMode,
           lowConfidence,
           totalResults,
@@ -423,11 +430,11 @@ export default function SearchInterface() {
         type: "user",
         text: `(Use this generated image for search)`,
         hasImage: true,
-        imagePreview: imageUrl,
+        imagePreviews: [imageUrl],
       });
 
-      // Pass it directly to handleSearch
-      handleSearch({ query: "", image: file, voiceText: "" });
+      // Pass it directly to handleSearch (as a single-element array now)
+      handleSearch({ query: "", images: [file], voiceText: "" });
     } catch (e) {
       console.error(e);
       const message = e instanceof Error ? e.message : "Unknown error";
@@ -509,7 +516,7 @@ export default function SearchInterface() {
                 key={i}
                 text={entry.text}
                 hasImage={entry.hasImage}
-                imagePreview={entry.imagePreview}
+                imagePreviews={entry.imagePreviews}
                 voiceQuery={entry.voiceQuery}
                 voiceError={entry.voiceError}
                 voiceRejectedText={entry.voiceRejectedText}
@@ -550,6 +557,16 @@ export default function SearchInterface() {
                         }}
                       />
                       {entry.color}
+                    </span>
+                  )}
+                  {entry.material && (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 font-medium">
+                      {entry.material}
+                    </span>
+                  )}
+                  {entry.pattern && (
+                    <span className="text-xs px-2 py-0.5 rounded-full bg-pink-100 text-pink-700 font-medium">
+                      {entry.pattern}
                     </span>
                   )}
                   {entry.mode && (

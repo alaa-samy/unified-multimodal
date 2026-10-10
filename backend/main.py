@@ -44,7 +44,7 @@ import asyncio
 import threading
 import traceback
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import numpy as np
 import faiss
@@ -56,7 +56,10 @@ from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
 from search_core import (CatalogIndex, COLOR_ALIASES, extract_color,
-                         extract_category, correct_spelling)
+                         extract_category, extract_material, extract_pattern,
+                         correct_spelling)
+
+import requests
 
 # ============================================================
 # Environment
@@ -82,6 +85,17 @@ ID_MAP_PATH      = DATA_DIR / "id_map.npy"
 BASE_URL         = os.getenv("BASE_URL", "http://localhost:8000")
 WHISPER_MODEL    = os.getenv("WHISPER_MODEL", "base.en")   # "tiny" mis-hears short words
 DEVICE           = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# NEW: LLM query understanding (the proposal's "Unified Understanding Engine").
+# A local Ollama LLM rewrites conversational queries into a compact,
+# attribute-rich search phrase so CLIP embeds the RIGHT thing.
+# Option A (cloud, nothing to download - RECOMMENDED): free Groq API
+#   -> set LLM_API_BASE + LLM_API_KEY + LLM_QUERY_MODEL (OpenAI-compatible)
+# Option B (local): Ollama -> set OLLAMA_URL (default http://localhost:11434)
+OLLAMA_URL       = os.getenv("OLLAMA_URL", "http://localhost:11434")
+LLM_QUERY_MODEL  = os.getenv("LLM_QUERY_MODEL", "llama3")
+LLM_API_BASE     = os.getenv("LLM_API_BASE", "")   # e.g. https://api.groq.com/openai/v1
+LLM_API_KEY      = os.getenv("LLM_API_KEY", "")
 
 # CLIP does better with a prompt than a bare word; average a few templates
 TEXT_TEMPLATES = ["a photo of {}", "a photo of a {}, furniture", "{}"]
@@ -272,6 +286,29 @@ def _encode_image(path: str) -> np.ndarray:
     return _normalize(f[0])
 
 
+def _encode_images(paths: Optional[List[str]]) -> Optional[np.ndarray]:
+    """
+    NEW: multi-image support. Encode each uploaded image, then fuse them into
+    a single unit vector by averaging the normalized embeddings (and
+    re-normalizing). A single image is returned as-is; failed images are
+    skipped so one bad upload doesn't kill the whole search.
+    """
+    if not paths:
+        return None
+    vecs = []
+    for p in paths:
+        try:
+            vecs.append(_encode_image(p))
+        except Exception as e:
+            print(f"[CLIP] Failed to encode image {p}: {e}")
+    if not vecs:
+        return None
+    if len(vecs) == 1:
+        return vecs[0]
+    fused = np.mean(np.stack(vecs, axis=0), axis=0)
+    return _normalize(fused)
+
+
 def _make_result(product: dict, hit: dict) -> dict:
     img  = product.get("image_path", "")
     glb  = product.get("glb_path")
@@ -293,11 +330,11 @@ def _make_result(product: dict, hit: dict) -> dict:
     }
 
 
-def _do_search(query: str, img_path: Optional[str], color: Optional[str],
+def _do_search(query: str, img_paths: Optional[List[str]], color: Optional[str],
                category: Optional[str], alpha: float, top_k: int):
-    """Encode text/image, fuse scores, rank. Returns (results, meta)."""
+    """Encode text/images, fuse scores, rank. Returns (results, meta)."""
     t = _encode_text(query) if query.strip() else None
-    i = _encode_image(img_path) if img_path else None
+    i = _encode_images(img_paths)
     hits, meta = _catalog.search(t, i, color=color, category=category,
                                  alpha=alpha, top_k=top_k)
     return [_make_result(_catalog.products[h["row"]], h) for h in hits], meta
@@ -306,7 +343,7 @@ def _do_search(query: str, img_path: Optional[str], color: Optional[str],
 _MIN_COLOR_MATCHES = 3  # fewer color-matching results than this => tier "color_relaxed"
 
 
-def _do_search_with_fallback(query: str, img_path: Optional[str],
+def _do_search_with_fallback(query: str, img_paths: Optional[List[str]],
                              color: Optional[str], category: Optional[str],
                              alpha: float, top_k: int):
     """
@@ -321,7 +358,7 @@ def _do_search_with_fallback(query: str, img_path: Optional[str],
     (The old "category_only" tier is gone: the category is a hard filter now,
     so there is nothing left to broaden.)
     """
-    results, meta = _do_search(query, img_path, color, category, alpha, top_k)
+    results, meta = _do_search(query, img_paths, color, category, alpha, top_k)
     if not results:
         return [], "none", meta
     if not color:
@@ -333,7 +370,72 @@ def _do_search_with_fallback(query: str, img_path: Optional[str],
 
 _HALLUCINATIONS = {"thank you", "thanks for watching", "thank you for watching", "you", "bye", "the end"}
 _STYLE_WORDS = {"furniture", "wooden", "wood", "leather", "fabric", "modern", "vintage", "small",
-                "large", "big", "dark", "cheap", "metal", "glass", "comfortable"}
+                "large", "big", "dark", "cheap", "metal", "glass", "comfortable",
+                # NEW: material / pattern words count as a valid search signal
+                "printed", "printted", "pattern", "patterned", "striped", "floral",
+                "velvet", "linen", "rattan", "wicker", "plaid", "chrome", "oak"}
+
+
+def _rewrite_query_with_llm(query: str) -> str:
+    """
+    NEW: LLM-based query understanding (proposal section 7.1.2, "Unified
+    Understanding Engine"). Rewrites a conversational request into a short,
+    attribute-rich search phrase that keeps EVERY visual attribute
+    (color, material, pattern, style, category):
+
+        "i want black leather sofa but with printted pattern"
+            -> "black leather sofa with printed pattern"
+
+    CLIP then embeds a clean phrase instead of a chatty sentence, so
+    material/pattern actually influence the ranking. Falls back silently to
+    the raw query when Ollama is not running.
+    """
+    if not query.strip():
+        return query
+    prompt = (
+        "You rewrite furniture shopping requests into product search phrases. "
+        "Rules:\n"
+        "1. Keep ALL visual attributes: color, material (leather, velvet, wood, "
+        "metal...), pattern (printed, floral, striped, plaid...), style and the "
+        "furniture category.\n"
+        "2. Fix spelling (e.g. 'printted' -> 'printed').\n"
+        "3. Remove filler words like 'i want', 'but', 'please', 'find me'.\n"
+        "4. Maximum 12 words, lowercase, no punctuation.\n"
+        "5. Output ONLY the search phrase, nothing else.\n\n"
+        f"Request: {query}\nSearch phrase:"
+    )
+    try:
+        if LLM_API_BASE and LLM_API_KEY:
+            # Cloud option (Groq / any OpenAI-compatible API) - nothing to download
+            r = requests.post(
+                f"{LLM_API_BASE}/chat/completions",
+                headers={"Authorization": f"Bearer {LLM_API_KEY}"},
+                json={"model": LLM_QUERY_MODEL,
+                      "messages": [{"role": "user", "content": prompt}],
+                      "temperature": 0},
+                timeout=8,
+            )
+            out = (r.json()["choices"][0]["message"]["content"] or "").strip()
+        else:
+            # Local option (Ollama)
+            r = requests.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": LLM_QUERY_MODEL, "prompt": prompt,
+                      "stream": False, "options": {"temperature": 0}},
+                timeout=8,
+            )
+            out = (r.json().get("response") or "").strip()
+        out = out.strip('"').strip(".").lower()
+        words = out.split()
+        if words and len(words) <= 15:
+            if out != query.strip().lower():
+                print(f"[LLM] Query rewrite: {query!r} -> {out!r}")
+            return out
+        print(f"[LLM] Rewrite ignored (bad output: {out!r})")
+    except Exception as e:
+        print(f"[LLM] Rewrite unavailable ({e}) - using raw query. "
+              f"Set LLM_API_BASE/LLM_API_KEY (cloud) or start Ollama for best results.")
+    return query
 
 
 def _looks_like_search(text: str) -> bool:
@@ -497,8 +599,9 @@ async def get_product(product_id: int):
 @app.post("/search/intelligent")
 async def search(
     query: Optional[str] = Form(""),
-    file:  Optional[UploadFile] = File(None),
-    image: Optional[UploadFile] = File(None),
+    file:  Optional[UploadFile] = File(None),        # legacy single-image field
+    files: Optional[List[UploadFile]] = File(None), # NEW: multiple images
+    image: Optional[UploadFile] = File(None),       # legacy alias
     audio: Optional[UploadFile] = File(None),
     top_k: int = Form(10),
     alpha: float = Form(0.5),     # text weight when text AND image are both used
@@ -521,7 +624,7 @@ async def search(
     voice_query = ""
     voice_error = None
     tmp_audio   = None
-    tmp_img     = None
+    tmp_imgs    = []          # NEW: one temp path per uploaded image
 
     # ---------------- voice -> text ----------------
     voice_rejected = None
@@ -570,20 +673,45 @@ async def search(
             print(f"[SEARCH] Spell corrected: {final_query!r} -> {fixed!r}")
             final_query = fixed
 
-    color_filter    = extract_color(final_query)
-    category_filter = extract_category(final_query)
+    # ---------------- LLM query understanding (NEW) ----------------
+    # "i want black leather sofa but with printted pattern"
+    #   -> "black leather sofa with printed pattern"
+    # Falls back to the raw query if Ollama is not running.
+    interpreted_query = final_query
+    if final_query:
+        rewritten = _rewrite_query_with_llm(final_query)
+        if rewritten and rewritten.lower() != final_query.lower():
+            interpreted_query = rewritten
+            final_query = rewritten
+
+    color_filter     = extract_color(final_query)
+    category_filter  = extract_category(final_query)
+    material_filter  = extract_material(final_query)   # NEW: leather / velvet / wood ...
+    pattern_filter   = extract_pattern(final_query)   # NEW: printed / striped / floral ...
 
     print(f"[SEARCH] typed={typed_query!r} voice={voice_query!r} final={final_query!r} "
-          f"color={color_filter} category={category_filter}")
+          f"color={color_filter} category={category_filter} "
+          f"material={material_filter} pattern={pattern_filter}")
 
-    # ---------------- image ----------------
-    img_file = file or image
-    if img_file:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as f:
-            f.write(await img_file.read())
-            tmp_img = f.name
+    # ---------------- image(s) ----------------
+    # Collect uploads from every supported field name (legacy single "file"/"image"
+    # plus the new repeated "files" field). Order is preserved.
+    img_uploads = [f for f in ([file] + list(files or []) + [image]) if f is not None]
+    for img_upload in img_uploads:
+        try:
+            data = await img_upload.read()
+            if not data:
+                continue
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as f:
+                f.write(data)
+                tmp_imgs.append(f.name)
+        except Exception as e:
+            print(f"[IMAGE] Error saving upload: {e}")
+    img_count = len(tmp_imgs)
+    if img_count > 1:
+        print(f"[SEARCH] {img_count} images uploaded - fusing embeddings")
 
-    if not final_query and not tmp_img:
+    if not final_query and not tmp_imgs:
         return _empty(typed_query, voice_query, voice_error,
                       "Please provide text, image, or voice")
 
@@ -591,40 +719,52 @@ async def search(
         # Image + pure color/style instruction ("similar but in black"): embed the
         # image only; the color is applied as a boost by the ranker.
         search_query = final_query
-        if tmp_img and color_filter and _is_color_modifier_only(final_query, color_filter):
+        if tmp_imgs and color_filter and _is_color_modifier_only(final_query, color_filter):
             print(f"[SEARCH] {final_query!r} is color-modifier-only - "
                   f"image-only embedding + {color_filter!r} boost")
             search_query = ""
 
+        # NEW: when the query names a material or pattern, the TEXT signal is
+        # the only place that information lives (the catalog metadata has no
+        # material/pattern labels), so give it more weight in the fusion.
+        if (material_filter or pattern_filter) and search_query:
+            alpha = min(0.75, alpha + 0.25)
+            print(f"[SEARCH] Specific attributes "
+                  f"(material={material_filter}, pattern={pattern_filter}) - "
+                  f"raising text weight to alpha={alpha:.2f}")
+
         results, fallback_tier, meta = await loop.run_in_executor(
-            None, _do_search_with_fallback, search_query, tmp_img, color_filter,
+            None, _do_search_with_fallback, search_query, tmp_imgs, color_filter,
             category_filter, max(0.0, min(1.0, alpha)), top_k)
     except Exception as e:
         print(f"[SEARCH] ERROR: {e}")
         traceback.print_exc()
         raise HTTPException(500, detail=f"Search failed: {e}")
     finally:
-        if tmp_img and os.path.exists(tmp_img):
-            os.remove(tmp_img)
+        for tmp in tmp_imgs:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
 
     parts = (["text"] if typed_query else []) + \
-            (["image"] if img_file else []) + \
+            ((["image"] if img_count == 1 else ["images"]) if img_count else []) + \
             (["voice"] if voice_query else [])
     mode      = " + ".join(parts) if parts else "unknown"
     color_str = f" {color_filter}" if color_filter else ""
 
     return {
-        "query": final_query, "interpreted_query": final_query,
+        "query": final_query, "interpreted_query": interpreted_query,
         "corrected_query": corrected_query,
         "typed_query": typed_query, "voice_query": voice_query,
         "voice_error": voice_error, "voice_rejected_text": voice_rejected,
         "accurate_results": results, "related_results": [],
         "total_results": len(results), "color_filter": color_filter,
         "category_filter": category_filter or meta.get("inferred_category"),
+        "material_filter": material_filter, "pattern_filter": pattern_filter,
         "low_confidence": meta.get("low_confidence", False),
         "search_mode": mode,
         "fallback_tier": fallback_tier,
-        "ai_summary": f"Found {len(results)}{color_str} items [{mode}]",
+        "ai_summary": f"Found {len(results)}{color_str} items matching "
+                      f"'{final_query}' [{mode}]",
     }
 
 
@@ -633,6 +773,7 @@ def _empty(typed, voice, verr, msg):
             "typed_query": typed, "voice_query": voice, "voice_error": verr, "voice_rejected_text": None,
             "accurate_results": [], "related_results": [],
             "total_results": 0, "color_filter": None, "category_filter": None,
+            "material_filter": None, "pattern_filter": None,
             "low_confidence": True, "search_mode": "none",
             "fallback_tier": "none", "ai_summary": msg}
 
