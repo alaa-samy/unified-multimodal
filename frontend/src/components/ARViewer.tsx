@@ -38,19 +38,6 @@ export function ARViewer({ productId, onClose }: ARViewerProps) {
 
         console.log("✅ Model URL:", foundProduct.model_url);
 
-        // Test if model URL is accessible
-        try {
-          const modelCheck = await fetch(foundProduct.model_url, { method: 'HEAD' });
-          console.log(`🔍 Model URL check: ${modelCheck.status}`);
-
-          if (!modelCheck.ok) {
-            throw new Error(`Model file not accessible (HTTP ${modelCheck.status})`);
-          }
-        } catch (err) {
-          console.error("❌ Model URL not accessible:", err);
-          throw new Error("3D model file not found on server");
-        }
-
         setProduct(foundProduct);
       } catch (err: any) {
         console.error("❌ Failed to load product:", err);
@@ -176,153 +163,70 @@ interface ModelViewerProps {
   productName: string;
 }
 
+const ModelViewerTag: any = "model-viewer";
+
 function ModelViewer({ modelUrl, posterUrl, productName }: ModelViewerProps) {
   const [modelError, setModelError] = useState(false);
   const [modelLoading, setModelLoading] = useState(true);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const [ready, setReady] = useState(false);
 
   useEffect(() => {
-    console.log("🔧 ModelViewer mounting...");
-    console.log("   Model URL:", modelUrl);
-    console.log("   Poster URL:", posterUrl);
-
-    // Load model-viewer script
-    const script = document.createElement("script");
+    let cancelled = false;
+    const scriptId = "model-viewer-script";
+    const existing = document.getElementById(scriptId) as HTMLScriptElement | null;
+    const script = existing || document.createElement("script");
+    script.id = scriptId;
     script.type = "module";
-    script.src = "https://ajax.googleapis.com/ajax/libs/model-viewer/3.3.0/model-viewer.min.js";
+    script.src = "https://ajax.googleapis.com/ajax/libs/model-viewer/4.1.0/model-viewer.min.js";
 
-    script.onload = () => {
-      console.log("✅ model-viewer library loaded");
-
-      // Give it a moment to initialize
-      setTimeout(() => {
-        if (containerRef.current) {
-          const modelViewer = containerRef.current.querySelector('model-viewer');
-          if (modelViewer) {
-            console.log("✅ model-viewer element found");
-
-            // Add event listeners
-            modelViewer.addEventListener('load', () => {
-              console.log("✅ 3D model loaded successfully");
-              setModelLoading(false);
-            });
-
-            modelViewer.addEventListener('error', (event: any) => {
-              console.error("❌ Model loading error:", event);
-              setModelError(true);
-              setModelLoading(false);
-            });
-
-            // Timeout fallback - hide loading after 10 seconds regardless
-            setTimeout(() => {
-              console.log("⏱️ Timeout reached, hiding loading screen");
-              setModelLoading(false);
-            }, 10000);
-          } else {
-            console.error("❌ model-viewer element not found in DOM");
-          }
-        }
-      }, 500);
+    const markReady = () => {
+      if (!cancelled) setReady(true);
     };
-
-    script.onerror = () => {
-      console.error("❌ Failed to load model-viewer library");
-      setModelError(true);
-      setModelLoading(false);
-    };
-
-    document.head.appendChild(script);
+    script.addEventListener("load", markReady, { once: true });
+    if (!existing) document.head.appendChild(script);
+    if (customElements.get("model-viewer")) markReady();
+    else customElements.whenDefined("model-viewer").then(markReady).catch(() => {
+      if (!cancelled) setModelError(true);
+    });
 
     return () => {
-      if (script.parentNode) {
-        script.parentNode.removeChild(script);
-      }
+      cancelled = true;
+      script.removeEventListener("load", markReady);
     };
-  }, [modelUrl]);
+  }, []);
 
   if (modelError) {
-    return (
-      <div className="w-full h-full flex items-center justify-center bg-gray-900 rounded-xl">
-        <div className="text-center text-white p-8">
-          <div className="text-6xl mb-4">⚠️</div>
-          <h3 className="text-xl font-semibold mb-2">Failed to Load 3D Model</h3>
-          <p className="text-gray-400 mb-4">The 3D model file could not be loaded.</p>
-          <div className="text-left bg-gray-800 rounded p-3 text-xs">
-            <p className="text-gray-500 mb-1">Model URL:</p>
-            <p className="text-red-400 break-all font-mono">{modelUrl}</p>
-          </div>
-          <p className="text-gray-500 text-xs mt-4">
-            Check browser console for more details
-          </p>
-        </div>
-      </div>
-    );
+    return <div className="w-full h-full flex items-center justify-center bg-gray-900 rounded-xl text-white p-8 text-center">
+      <div><div className="text-5xl mb-3">⚠️</div><h3 className="text-xl font-semibold mb-2">3D model could not load</h3><p className="text-gray-400 text-sm break-all">{modelUrl}</p></div>
+    </div>;
   }
 
   return (
-    <div className="w-full h-full relative" ref={containerRef}>
-      {modelLoading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-gray-900 rounded-xl z-20">
-          <div className="text-center text-white">
-            <div className="w-16 h-16 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
-            <p className="text-lg font-medium mb-2">Loading 3D Model...</p>
-            <p className="text-sm text-gray-400">This may take a few seconds</p>
-          </div>
-        </div>
+    <div className="w-full h-full relative rounded-xl overflow-hidden bg-gray-900">
+      {(!ready || modelLoading) && <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-900 text-white">
+        <div className="text-center"><div className="w-12 h-12 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" /><p>{ready ? "Loading 3D model…" : "Loading AR viewer…"}</p></div>
+      </div>}
+      {ready && (
+        <ModelViewerTag
+          src={modelUrl}
+          poster={posterUrl || undefined}
+          alt={productName}
+          ar
+          ar-modes="webxr scene-viewer quick-look"
+          camera-controls
+          auto-rotate
+          shadow-intensity="1"
+          environment-image="neutral"
+          exposure="1.1"
+          style={{ width: "100%", height: "100%", backgroundColor: "#111827", borderRadius: "0.75rem" }}
+          onLoad={() => setModelLoading(false)}
+          onError={() => { setModelLoading(false); setModelError(true); }}
+        >
+          <button slot="ar-button" className="absolute bottom-5 left-1/2 -translate-x-1/2 rounded-xl bg-violet-600 px-5 py-3 font-semibold text-white shadow-lg hover:bg-violet-700">
+            View in your space
+          </button>
+        </ModelViewerTag>
       )}
-
-      {/* Use dangerouslySetInnerHTML but add onLoad handlers via useEffect */}
-      <div
-        className="w-full h-full"
-        dangerouslySetInnerHTML={{
-          __html: `
-            <model-viewer
-              src="${modelUrl}"
-              ${posterUrl ? `poster="${posterUrl}"` : ''}
-              alt="${productName}"
-              ar
-              ar-modes="webxr scene-viewer quick-look"
-              camera-controls
-              auto-rotate
-              shadow-intensity="1"
-              environment-image="neutral"
-              exposure="1.2"
-              tone-mapping="commerce"
-              style="width: 100%; height: 100%; border-radius: 1rem; background-color: #1f2937; --poster-color: transparent;"
-            >
-              <button
-                slot="ar-button"
-                style="
-                  position: absolute;
-                  bottom: 20px;
-                  left: 50%;
-                  transform: translateX(-50%);
-                  background: linear-gradient(135deg, #7c3aed 0%, #a855f7 100%);
-                  color: white;
-                  padding: 14px 28px;
-                  border-radius: 12px;
-                  border: none;
-                  font-size: 16px;
-                  font-weight: 600;
-                  cursor: pointer;
-                  display: flex;
-                  align-items: center;
-                  gap: 10px;
-                  box-shadow: 0 8px 16px rgba(124, 58, 237, 0.4);
-                  transition: all 0.3s ease;
-                "
-                onmouseover="this.style.transform='translateX(-50%) scale(1.05)'"
-                onmouseout="this.style.transform='translateX(-50%) scale(1)'"
-              >
-                <span style="font-size: 20px;">📱</span>
-                <span>View in Your Space</span>
-              </button>
-              
-              <div slot="progress-bar" style="display: none;"></div>
-            </model-viewer>
-          `
-        }}
-      />
     </div>
   );
 }

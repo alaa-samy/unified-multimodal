@@ -13,8 +13,8 @@ from PIL import Image
 import numpy as np
 import faiss
 import torch
-from transformers import CLIPProcessor, CLIPModel
 from clip_color import classify_color_clip
+from embedding_backend import encode_image, encode_text, load_embedding_model
 
 # =========================
 # Color utilities
@@ -81,16 +81,12 @@ with open(metadata_path, "r", encoding="utf-8") as f:
 print(f"📄 Loaded {len(items)} Pix3D entries")
 
 # =========================
-# CLIP setup
+# Embedding model setup. Use the same EMBEDDING_MODEL value at serving time.
 # =========================
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-clip_model = CLIPModel.from_pretrained(
-    "openai/clip-vit-base-patch32"
-).to(device).eval()
-clip_processor = CLIPProcessor.from_pretrained(
-    "openai/clip-vit-base-patch32"
-)
+clip_model, clip_processor, embedding_model_name = load_embedding_model(device)
+print(f"Using embedding model: {embedding_model_name}")
 
 # =========================
 # Storage
@@ -160,22 +156,8 @@ for it in tqdm(items, desc="Processing Pix3D"):
     }
 
     # ---------- EMBEDDINGS ----------
-    img_inputs = clip_processor(images=img, return_tensors="pt").to(device)
-    txt_inputs = clip_processor(
-        text=[product_name],
-        return_tensors="pt",
-        padding=True
-    ).to(device)
-
-    with torch.no_grad():
-        img_feat = clip_model.get_image_features(**img_inputs)
-        txt_feat = clip_model.get_text_features(**txt_inputs)
-
-    img_feat = img_feat.cpu().numpy()
-    txt_feat = txt_feat.cpu().numpy()
-
-    img_feat /= np.linalg.norm(img_feat)
-    txt_feat /= np.linalg.norm(txt_feat)
+    img_feat = encode_image(clip_model, clip_processor, img, device)
+    txt_feat = encode_text(clip_model, clip_processor, [product_name], device)
 
     image_embeddings.append(img_feat)
     text_embeddings.append(txt_feat)

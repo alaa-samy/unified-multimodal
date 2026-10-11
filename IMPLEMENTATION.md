@@ -65,3 +65,16 @@ This document outlines the current architecture, implementation steps, and desig
 - **Search Issue**: Fixed overly aggressive color filtering that caused 0 results for "blue sofa".
 - **Checkout Issue**: Resolved redundant backend calls and fixed missing `/checkout/cart/add` endpoint.
 - **UI Polishing**: Synchronized AI feedback summary to provide actionable tips when results are low.
+
+## Retrieval and benchmark foundation (2026 repair pass)
+
+The backend now uses `backend/embedding_backend.py` as a model adapter. The recommended default is `google/siglip-base-patch16-224`; set `EMBEDDING_MODEL=clip` to run the legacy baseline. **Indexes must be rebuilt whenever this value changes**, because embedding dimensions and vector spaces are model-specific:
+
+```bash
+cd backend
+EMBEDDING_MODEL=google/siglip-base-patch16-224 python preprocess_pix3d.py
+```
+
+The frontend AR viewer now loads the versioned `model-viewer` web component, uses the product's GLB URL directly, and supports WebXR/Scene Viewer/Quick Look where the device and browser support them. A desktop browser still provides a 3D preview rather than full room placement.
+
+`backend/plugin_contracts.py` defines the boundary for future dataset plugins (such as a licensed Amazon/ABP catalog) and competitor search providers. Every provider should be evaluated on the same labeled query set using Recall@5, Recall@10, MRR, and latency. Conversion rate must be measured separately in a controlled user experiment; retrieval scores alone do not prove conversion improvement.

@@ -17,6 +17,7 @@ interface SearchCardProps {
   model_url?: string | null;
   onViewAR?: (id: number) => void;
   onAddToCart?: () => void;
+  onBuyNow?: () => void;
 }
 
 export function SearchCard({
@@ -30,7 +31,8 @@ export function SearchCard({
   has_3d_model,
   model_url,
   onViewAR,
-  onAddToCart
+  onAddToCart,
+  onBuyNow
 }: SearchCardProps) {
   const [imageError, setImageError] = useState(false);
 
@@ -163,10 +165,16 @@ export function SearchCard({
           </div>
           
           {onAddToCart && (
-            <button onClick={onAddToCart}
-              className="flex-1 py-2 bg-violet-600 text-white text-xs rounded-lg hover:bg-violet-700 transition-colors font-medium w-full">
-              + Add to Cart
-            </button>
+            <div className="grid grid-cols-2 gap-2">
+              <button onClick={onAddToCart}
+                className="py-2 bg-violet-600 text-white text-xs rounded-lg hover:bg-violet-700 transition-colors font-medium">
+                + Add to Cart
+              </button>
+              {onBuyNow && <button onClick={onBuyNow}
+                className="py-2 border border-violet-200 text-violet-700 text-xs rounded-lg hover:bg-violet-50 transition-colors font-medium">
+                Buy now
+              </button>}
+            </div>
           )}
         </div>
       </CardContent>

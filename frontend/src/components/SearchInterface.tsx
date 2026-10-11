@@ -8,7 +8,7 @@ import { ImageGenerator } from "./ImageGenerator";
 import { CartDrawer } from "./CartDrawer";
 import { OrderConfirmation } from "./OrderConfirmation";
 import { useCart } from "@/hooks/useCart";
-import { CheckoutPage } from "@/app/checkout/page";
+import { CheckoutPage } from "./CheckoutPage";
 
 // ── Types ──────────────────────────────────────────────────
 interface SearchSession {
@@ -604,6 +604,17 @@ export default function SearchInterface() {
                           score: p.score,
                         })
                       }
+                      onBuyNow={async () => {
+                        await addItem({
+                          id: Number(p.id),
+                          name: p.name,
+                          category: p.category,
+                          color: p.color,
+                          image_url: p.image_url,
+                          score: p.score,
+                        });
+                        setScreen("checkout");
+                      }}
                     />
                   ))}
                 </div>

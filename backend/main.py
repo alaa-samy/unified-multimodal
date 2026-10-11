@@ -58,6 +58,7 @@ from dotenv import load_dotenv
 from search_core import (CatalogIndex, COLOR_ALIASES, extract_color,
                          extract_category, extract_material, extract_pattern,
                          correct_spelling)
+from embedding_backend import DEFAULT_MODEL, encode_image, encode_text, load_embedding_model
 
 import requests
 
@@ -110,6 +111,7 @@ _products      = None
 _catalog: Optional[CatalogIndex] = None
 _clip_model    = None
 _clip_proc     = None
+_embedding_model_name = DEFAULT_MODEL
 _whisper_model = None
 
 _data_ready    = False
@@ -188,12 +190,9 @@ def _ensure_clip():
             return True
         try:
             print("[CLIP] Loading... (~30s first time)")
-            from transformers import CLIPModel, CLIPProcessor
-            _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
-            _clip_model.to(DEVICE).eval()
-            _clip_proc  = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+            _clip_model, _clip_proc, _embedding_model_name = load_embedding_model(DEVICE)
             _clip_ready = True
-            print("[CLIP] Ready")
+            print(f"[EMBEDDING] Ready: {_embedding_model_name}")
             return True
         except Exception as e:
             _clip_error = str(e)
@@ -271,19 +270,12 @@ def _normalize(v: np.ndarray) -> np.ndarray:
 
 def _encode_text(q: str) -> np.ndarray:
     prompts = [t.format(q) for t in TEXT_TEMPLATES]
-    inp = _clip_proc(text=prompts, return_tensors="pt", padding=True,
-                     truncation=True, max_length=77).to(DEVICE)
-    with torch.no_grad():
-        f = _clip_model.get_text_features(**inp).cpu().numpy().astype("float32")
-    return _normalize(_normalize(f).mean(axis=0))
+    return _normalize(encode_text(_clip_model, _clip_proc, prompts, DEVICE).mean(axis=0, keepdims=True))[0]
 
 
 def _encode_image(path: str) -> np.ndarray:
     img = Image.open(path).convert("RGB")
-    inp = _clip_proc(images=img, return_tensors="pt").to(DEVICE)
-    with torch.no_grad():
-        f = _clip_model.get_image_features(**inp).cpu().numpy().astype("float32")
-    return _normalize(f[0])
+    return encode_image(_clip_model, _clip_proc, img, DEVICE)[0]
 
 
 def _encode_images(paths: Optional[List[str]]) -> Optional[np.ndarray]:
