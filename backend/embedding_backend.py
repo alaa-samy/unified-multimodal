@@ -18,12 +18,23 @@ DEFAULT_MODEL = os.getenv("EMBEDDING_MODEL", "google/siglip-base-patch16-224")
 
 
 def load_embedding_model(device: torch.device):
-    from transformers import AutoProcessor, AutoModel
+    try:
+        from transformers import AutoModel, AutoProcessor
+    except ImportError as exc:
+        raise RuntimeError("Transformers is required. Upgrade with: python -m pip install -U 'transformers>=4.41.0'") from exc
 
     model_name = DEFAULT_MODEL
     if model_name == "clip":
         model_name = "openai/clip-vit-large-patch14"
-    processor = AutoProcessor.from_pretrained(model_name)
+    try:
+        processor = AutoProcessor.from_pretrained(model_name)
+    except ValueError as exc:
+        if model_name.startswith("google/siglip"):
+            raise RuntimeError(
+                "This SigLIP model needs a newer Transformers package. "
+                "Run: python -m pip install -U 'transformers>=4.41.0'"
+            ) from exc
+        raise
     model = AutoModel.from_pretrained(model_name).to(device).eval()
     return model, processor, model_name
 
