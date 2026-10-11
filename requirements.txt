@@ -5,6 +5,7 @@ scipy
 faiss-cpu # Or faiss-gpu if using a dedicated instance
 torch
 transformers>=4.41.0
+sentencepiece>=0.1.99
 Pillow
 requests
 python-dotenv

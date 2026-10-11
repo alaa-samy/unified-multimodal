@@ -28,6 +28,13 @@ def load_embedding_model(device: torch.device):
         model_name = "openai/clip-vit-large-patch14"
     try:
         processor = AutoProcessor.from_pretrained(model_name)
+    except (ModuleNotFoundError, ImportError) as exc:
+        if "sentencepiece" in str(exc).lower() or "SentencePiece" in repr(exc):
+            raise RuntimeError(
+                "SigLIP requires SentencePiece. Install it with: "
+                "python -m pip install -U sentencepiece"
+            ) from exc
+        raise
     except ValueError as exc:
         if model_name.startswith("google/siglip"):
             raise RuntimeError(
