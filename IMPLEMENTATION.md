@@ -75,6 +75,20 @@ cd backend
 EMBEDDING_MODEL=google/siglip-base-patch16-224 python preprocess_pix3d.py
 ```
 
+On Windows PowerShell, use:
+
+```powershell
+$env:EMBEDDING_MODEL = "google/siglip-base-patch16-224"
+python .\preprocess_pix3d.py
+```
+
+On Windows Command Prompt, use:
+
+```bat
+set EMBEDDING_MODEL=google/siglip-base-patch16-224
+python preprocess_pix3d.py
+```
+
 The frontend AR viewer now loads the versioned `model-viewer` web component, uses the product's GLB URL directly, and supports WebXR/Scene Viewer/Quick Look where the device and browser support them. A desktop browser still provides a 3D preview rather than full room placement.
 
 `backend/plugin_contracts.py` defines the boundary for future dataset plugins (such as a licensed Amazon/ABP catalog) and competitor search providers. Every provider should be evaluated on the same labeled query set using Recall@5, Recall@10, MRR, and latency. Conversion rate must be measured separately in a controlled user experiment; retrieval scores alone do not prove conversion improvement.
