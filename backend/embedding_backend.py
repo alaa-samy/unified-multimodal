@@ -47,6 +47,17 @@ def load_embedding_model(device: torch.device):
 
 
 def _normalize(values: torch.Tensor) -> np.ndarray:
+    if not torch.is_tensor(values):
+        pooled = getattr(values, "pooler_output", None)
+        if pooled is None:
+            hidden = getattr(values, "last_hidden_state", None)
+            if hidden is not None:
+                pooled = hidden.mean(dim=1)
+        if pooled is None and isinstance(values, (tuple, list)) and values:
+            pooled = values[0]
+        if pooled is None:
+            raise TypeError(f"Unsupported embedding output type: {type(values).__name__}")
+        values = pooled
     values = values.float()
     values = values / values.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     return values.detach().cpu().numpy().astype("float32")
