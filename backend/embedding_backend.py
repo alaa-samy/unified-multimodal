@@ -46,18 +46,38 @@ def load_embedding_model(device: torch.device):
     return model, processor, model_name
 
 
-def _normalize(values: torch.Tensor) -> np.ndarray:
-    if not torch.is_tensor(values):
-        pooled = getattr(values, "pooler_output", None)
-        if pooled is None:
-            hidden = getattr(values, "last_hidden_state", None)
-            if hidden is not None:
-                pooled = hidden.mean(dim=1)
-        if pooled is None and isinstance(values, (tuple, list)) and values:
-            pooled = values[0]
-        if pooled is None:
-            raise TypeError(f"Unsupported embedding output type: {type(values).__name__}")
-        values = pooled
+def _as_tensor(values: Any) -> torch.Tensor:
+    """Extract a tensor from tensors, tuples, and Transformers model outputs."""
+    if torch.is_tensor(values):
+        return values
+
+    # Prefer a pooled representation because it is already the model's
+    # sentence/image representation. Some Transformers versions wrap it more
+    # than once, so recurse instead of assuming one fixed output class.
+    pooled = getattr(values, "pooler_output", None)
+    if pooled is not None:
+        try:
+            return _as_tensor(pooled)
+        except TypeError:
+            pass
+
+    hidden = getattr(values, "last_hidden_state", None)
+    if hidden is not None:
+        hidden_tensor = _as_tensor(hidden)
+        return hidden_tensor.mean(dim=1) if hidden_tensor.ndim == 3 else hidden_tensor
+
+    if isinstance(values, (tuple, list)):
+        for item in values:
+            try:
+                return _as_tensor(item)
+            except TypeError:
+                continue
+
+    raise TypeError(f"Unsupported embedding output type: {type(values).__name__}")
+
+
+def _normalize(values: Any) -> np.ndarray:
+    values = _as_tensor(values)
     values = values.float()
     values = values / values.norm(dim=-1, keepdim=True).clamp_min(1e-8)
     return values.detach().cpu().numpy().astype("float32")
