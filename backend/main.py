@@ -112,6 +112,7 @@ _catalog: Optional[CatalogIndex] = None
 _clip_model    = None
 _clip_proc     = None
 _embedding_model_name = DEFAULT_MODEL
+_index_dimension = None
 _whisper_model = None
 
 _data_ready    = False
@@ -157,7 +158,7 @@ async def startup():
 # ============================================================
 
 def _ensure_data():
-    global _products, _catalog, _data_ready, _data_error
+    global _products, _catalog, _data_ready, _data_error, _index_dimension
     with _data_lock:
         if _data_ready:
             return True
@@ -170,6 +171,7 @@ def _ensure_data():
             matrix = index.reconstruct_n(0, index.ntotal)       # exact search in numpy
             rows   = [_products[int(pid)] for pid in id_map]    # row i <-> product
             _catalog = CatalogIndex(matrix, rows)
+            _index_dimension = int(index.d)
             _data_ready = True
             n_hist = sum(1 for p in _products if p.get("color_hist"))
             print(f"[DATA] Ready - {len(_products)} products, {n_hist} with color histograms")
@@ -184,7 +186,7 @@ def _ensure_data():
 
 
 def _ensure_clip():
-    global _clip_model, _clip_proc, _clip_ready, _clip_error
+    global _clip_model, _clip_proc, _clip_ready, _clip_error, _embedding_model_name
     with _clip_lock:
         if _clip_ready:
             return True
@@ -199,6 +201,21 @@ def _ensure_clip():
             print(f"[CLIP] ERROR: {e}")
             traceback.print_exc()
             return False
+
+
+def _ensure_index_compatible():
+    """Fail early with a rebuild command instead of exposing a matmul error."""
+    expected = getattr(getattr(_clip_model, "config", None), "projection_dim", None)
+    if expected is None:
+        return
+    if _index_dimension is not None and int(expected) != int(_index_dimension):
+        raise RuntimeError(
+            f"Embedding/index dimension mismatch: model {_embedding_model_name} "
+            f"outputs {int(expected)} dimensions but image_index.faiss has "
+            f"{int(_index_dimension)}. Rebuild the index with the same model: "
+            f"set EMBEDDING_MODEL={_embedding_model_name} and run "
+            f"python preprocess_pix3d.py"
+        )
 
 
 def _ensure_whisper():
@@ -611,6 +628,10 @@ async def search(
         ok = await loop.run_in_executor(None, _ensure_clip)
         if not ok:
             raise HTTPException(500, detail=f"CLIP failed: {_clip_error}")
+        try:
+            _ensure_index_compatible()
+        except RuntimeError as exc:
+            raise HTTPException(503, detail=str(exc)) from exc
 
     typed_query = (query or "").strip()
     voice_query = ""

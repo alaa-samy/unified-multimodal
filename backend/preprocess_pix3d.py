@@ -64,6 +64,7 @@ OUT_JSON = os.path.join(OUT_DIR, "clean_products.json")
 IMAGE_INDEX = os.path.join(OUT_DIR, "image_index.faiss")
 TEXT_INDEX = os.path.join(OUT_DIR, "text_index.faiss")
 ID_MAP = os.path.join(OUT_DIR, "id_map.npy")
+INDEX_METADATA = os.path.join(OUT_DIR, "index_metadata.json")
 
 os.makedirs(OUT_IMAGES, exist_ok=True)
 
@@ -186,6 +187,13 @@ np.save(ID_MAP, np.array(id_map))
 
 with open(OUT_JSON, "w", encoding="utf-8") as f:
     json.dump(products, f, indent=2)
+
+with open(INDEX_METADATA, "w", encoding="utf-8") as f:
+    json.dump({
+        "embedding_model": embedding_model_name,
+        "dimension": int(d),
+        "products": len(products),
+    }, f, indent=2)
 
 print("✅ Preprocessing complete")
 print(f"📦 Products: {len(products)}")
