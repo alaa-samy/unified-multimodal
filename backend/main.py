@@ -121,6 +121,7 @@ _whisper_ready = False
 _data_error    = None
 _clip_error    = None
 _whisper_error = None
+_llm_warned    = False
 
 _data_lock    = threading.Lock()
 _clip_lock    = threading.Lock()
@@ -384,6 +385,17 @@ _STYLE_WORDS = {"furniture", "wooden", "wood", "leather", "fabric", "modern", "v
                 "printed", "printted", "pattern", "patterned", "striped", "floral",
                 "velvet", "linen", "rattan", "wicker", "plaid", "chrome", "oak"}
 
+_QUERY_FILLER_WORDS = {"i", "want", "to", "search", "for", "find", "me", "show", "please",
+                       "looking", "look", "give", "can", "you", "a", "an", "the", "some",
+                       "product", "products", "item", "items", "with", "that", "has", "have"}
+
+
+def _deterministic_search_phrase(query: str) -> str:
+    """Remove conversational filler while preserving searchable attributes."""
+    words = re.findall(r"[a-z]+", (query or "").lower())
+    compact = [word for word in words if word not in _QUERY_FILLER_WORDS]
+    return " ".join(compact[:15]) or query.strip().lower()
+
 
 def _rewrite_query_with_llm(query: str) -> str:
     """
@@ -413,6 +425,7 @@ def _rewrite_query_with_llm(query: str) -> str:
         "5. Output ONLY the search phrase, nothing else.\n\n"
         f"Request: {query}\nSearch phrase:"
     )
+    global _llm_warned
     try:
         if LLM_API_BASE and LLM_API_KEY:
             # Cloud option (Groq / any OpenAI-compatible API) - nothing to download
@@ -442,9 +455,11 @@ def _rewrite_query_with_llm(query: str) -> str:
             return out
         print(f"[LLM] Rewrite ignored (bad output: {out!r})")
     except Exception as e:
-        print(f"[LLM] Rewrite unavailable ({e}) - using raw query. "
-              f"Set LLM_API_BASE/LLM_API_KEY (cloud) or start Ollama for best results.")
-    return query
+        if not _llm_warned:
+            print(f"[LLM] Optional rewrite unavailable ({e}) - using deterministic parsing. "
+                  f"Set LLM_API_BASE/LLM_API_KEY (cloud) or start Ollama to enable rewrites.")
+            _llm_warned = True
+    return _deterministic_search_phrase(query)
 
 
 def _looks_like_search(text: str) -> bool:
