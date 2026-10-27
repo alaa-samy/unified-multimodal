@@ -2,18 +2,16 @@ fastapi>=0.100.0
 uvicorn
 numpy
 scipy
-faiss-cpu # Or faiss-gpu if using a dedicated instance
+faiss-cpu
 torch
 transformers>=4.41.0
 sentencepiece>=0.1.99
 Pillow
 requests
 python-dotenv
-google-genai # for the google.generativeai library
-openai # if you use the Whisper API
-
-
-venv\Scripts\activate
-.\.venv\Scripts\Activate.ps1
-
-python -m uvicorn main:app --reload --port 8000
+google-genai
+openai
+faster-whisper
+pydantic
+sqlalchemy
+chromadb
