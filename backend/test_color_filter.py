@@ -5,7 +5,7 @@ import requests
 
 API_URL = "http://localhost:8000"
 
-def test_color_search(query: str):
+def check_color_search(query: str):
     """Test search with color"""
     print(f"\n{'='*60}")
     print(f"🔍 Testing: '{query}'")
@@ -67,7 +67,7 @@ if __name__ == "__main__":
     ]
     
     for query in test_queries:
-        test_color_search(query)
+        check_color_search(query)
     
     print("\n" + "="*60)
     print("📋 SUMMARY")

@@ -78,10 +78,25 @@ def color_histogram(image_path: Path, prior_color: object = "") -> dict[str, flo
         keep = ~background_like
     selected = pixels[keep] if keep.any() else pixels
 
-    # Compare in normalized RGB to reduce lighting intensity effects.
-    normalized = selected / np.maximum(selected.mean(axis=1, keepdims=True), 1.0) * 128.0
-    refs = COLOR_RGB / np.maximum(COLOR_RGB.mean(axis=1, keepdims=True), 1.0) * 128.0
-    labels = np.argmin(((normalized[:, None, :] - refs[None, :, :]) ** 2).mean(axis=2), axis=1)
+    # Neutral pixels (low chroma) are split by brightness: black / gray / white.
+    # Chromatic pixels are matched on intensity-normalised RGB so shading does not
+    # change the hue bucket. (The old code normalised EVERY pixel by its mean
+    # intensity, which erases brightness: black, gray and white all became ~(128,128,128)
+    # and a black sofa was labelled "white".)
+    idx = {name: i for i, name in enumerate(COLOR_NAMES)}
+    neutral = (selected.max(axis=1) - selected.min(axis=1)) < 28
+    labels = np.empty(len(selected), dtype=np.int64)
+    value = selected.mean(axis=1)
+    labels[neutral] = np.where(value[neutral] < 75, idx["black"],
+                               np.where(value[neutral] > 195, idx["white"], idx["gray"]))
+    chroma = ~neutral
+    if chroma.any():
+        chroma_ids = [i for i, n in enumerate(COLOR_NAMES) if n not in ("black", "white", "gray")]
+        pix = selected[chroma]
+        normalized = pix / np.maximum(pix.mean(axis=1, keepdims=True), 1.0) * 128.0
+        refs = COLOR_RGB[chroma_ids] / np.maximum(COLOR_RGB[chroma_ids].mean(axis=1, keepdims=True), 1.0) * 128.0
+        nearest = np.argmin(((normalized[:, None, :] - refs[None, :, :]) ** 2).mean(axis=2), axis=1)
+        labels[chroma] = np.asarray(chroma_ids)[nearest]
     counts = np.bincount(labels, minlength=len(COLOR_NAMES)).astype(np.float32)
 
     # Keep meaningful colors only, but preserve the strongest bucket.
