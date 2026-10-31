@@ -15,3 +15,9 @@ faster-whisper
 pydantic
 sqlalchemy
 chromadb
+
+
+.\.venv\Scripts\Activate.ps1 
+python -m uvicorn main:app --reload --port 8000   
+
+

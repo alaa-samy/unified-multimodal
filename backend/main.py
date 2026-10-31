@@ -32,6 +32,9 @@ NEW / CHANGED
   5. Fuzzy spell correction; Whisper initial prompt with furniture words.
   6. root() had lost its @app.get("/") decorator - restored.
   7. Response adds: corrected_query, category_filter, low_confidence.
+  8. Voice: spoken command words ("search for", "find me") are removed from
+     the text that is ENCODED (clean_spoken_query). The transcript shown to
+     the user is unchanged.
 =====================================================================
 """
 
@@ -397,6 +400,22 @@ def _deterministic_search_phrase(query: str) -> str:
     return " ".join(compact[:15]) or query.strip().lower()
 
 
+def clean_spoken_query(text: str) -> str:
+    """
+    Remove spoken command phrases ("search for", "find me a", "please show me")
+    and punctuation, so only the product words are encoded. The transcript shown
+    to the user is NOT changed; this only affects what CLIP encodes.
+    """
+    prefixes = re.compile(
+        r"^\s*(please\s+)?(can you |could you |i (want|need|am looking for|would like) (to )?)?"
+        r"(search|find|show|look|looking|get|give)( me| for| up)?\s+(for\s+|up\s+)?(a |an |the |some )?",
+        re.IGNORECASE)
+    cleaned = prefixes.sub("", text or "").strip()
+    cleaned = re.sub(r"[^\w\s-]", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned or (text or "").strip()
+
+
 def _rewrite_query_with_llm(query: str) -> str:
     """
     NEW: LLM-based query understanding (proposal section 7.1.2, "Unified
@@ -692,7 +711,10 @@ async def search(
                 os.remove(tmp_audio)
 
     # ---------------- merge text sources + spell correction ----------------
-    final_query = " ".join(x for x in (voice_query, typed_query) if x).strip()
+    # voice_query is what the user sees. Only the ENCODED version has spoken
+    # command words ("search for", "find me a") removed.
+    voice_for_search = clean_spoken_query(voice_query) if voice_query else ""
+    final_query = " ".join(x for x in (voice_for_search, typed_query) if x).strip()
     corrected_query = None
     if final_query:
         fixed = correct_spelling(final_query)
