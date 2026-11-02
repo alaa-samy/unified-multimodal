@@ -116,6 +116,7 @@ _clip_model    = None
 _clip_proc     = None
 _embedding_model_name = DEFAULT_MODEL
 _index_dimension = None
+_index_checked = False
 _whisper_model = None
 
 _data_ready    = False
@@ -208,18 +209,25 @@ def _ensure_clip():
 
 
 def _ensure_index_compatible():
-    """Fail early with a rebuild command instead of exposing a matmul error."""
-    expected = getattr(getattr(_clip_model, "config", None), "projection_dim", None)
-    if expected is None:
+    """Probe the actual model output before FAISS can raise a cryptic matmul error."""
+    global _index_checked
+    if _index_checked or _index_dimension is None:
         return
-    if _index_dimension is not None and int(expected) != int(_index_dimension):
+
+    # Do not rely only on config.projection_dim: Transformers model-output
+    # classes and nested SigLIP configs differ between versions. The encoder
+    # probe measures the exact vector that will be multiplied by the index.
+    probe = encode_text(_clip_model, _clip_proc, ["dimension probe"], DEVICE)
+    actual = int(probe.shape[-1])
+    if actual != int(_index_dimension):
         raise RuntimeError(
             f"Embedding/index dimension mismatch: model {_embedding_model_name} "
-            f"outputs {int(expected)} dimensions but image_index.faiss has "
+            f"outputs {actual} dimensions but image_index.faiss has "
             f"{int(_index_dimension)}. Rebuild the index with the same model: "
             f"set EMBEDDING_MODEL={_embedding_model_name} and run "
             f"python preprocess_pix3d.py"
         )
+    _index_checked = True
 
 
 def _ensure_whisper():

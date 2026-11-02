@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import torch
 
 from embedding_backend import _normalize
@@ -17,3 +18,17 @@ def test_normalize_pools_last_hidden_state():
     })()
     result = _normalize(output)
     np.testing.assert_allclose(result, [[1.0, 0.0]], rtol=1e-6, atol=1e-6)
+
+
+def test_index_dimension_guard_reports_actual_encoder_width(monkeypatch):
+    import main
+
+    monkeypatch.setattr(main, "_index_dimension", 512)
+    monkeypatch.setattr(main, "_index_checked", False)
+    monkeypatch.setattr(main, "_clip_model", object())
+    monkeypatch.setattr(main, "_clip_proc", object())
+    monkeypatch.setattr(main, "_embedding_model_name", "google/siglip-base-patch16-224")
+    monkeypatch.setattr(main, "encode_text", lambda *args, **kwargs: np.zeros((1, 768), dtype="float32"))
+
+    with pytest.raises(RuntimeError, match="outputs 768 dimensions.*has 512"):
+        main._ensure_index_compatible()
