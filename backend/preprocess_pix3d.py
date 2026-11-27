@@ -62,6 +62,11 @@ OUT_DIR = "data"
 OUT_IMAGES = os.path.join(OUT_DIR, "images")
 OUT_JSON = os.path.join(OUT_DIR, "clean_products.json")
 IMAGE_INDEX = os.path.join(OUT_DIR, "image_index.faiss")
+# NOTE: text_index.faiss is an EVALUATION-ONLY artifact. The serving stack
+# (main.py / search_core.py) never reads it - queries are matched against the
+# IMAGE embeddings. It exists so evaluation.py can run the Text->Image
+# retrieval protocol (product-name text embeddings as queries against the
+# image index) without reloading CLIP.
 TEXT_INDEX = os.path.join(OUT_DIR, "text_index.faiss")
 ID_MAP = os.path.join(OUT_DIR, "id_map.npy")
 INDEX_METADATA = os.path.join(OUT_DIR, "index_metadata.json")
@@ -179,9 +184,11 @@ img_index = faiss.IndexFlatIP(d)
 txt_index = faiss.IndexFlatIP(d)
 
 img_index.add(image_matrix)
-txt_index.add(text_matrix)
 
 faiss.write_index(img_index, IMAGE_INDEX)
+# Evaluation-only (see NOTE above): Text->Image retrieval metrics in
+# evaluation.py reconstruct these embeddings as queries. Serving never reads it.
+txt_index.add(text_matrix)
 faiss.write_index(txt_index, TEXT_INDEX)
 np.save(ID_MAP, np.array(id_map))
 

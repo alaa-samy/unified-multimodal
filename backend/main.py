@@ -58,6 +58,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 
+import vlm_understanding
 from search_core import (CatalogIndex, COLOR_ALIASES, extract_color,
                          extract_category, extract_material, extract_pattern,
                          correct_spelling)
@@ -777,6 +778,22 @@ async def search(
         return _empty(typed_query, voice_query, voice_error,
                       "Please provide text, image, or voice")
 
+    # ---------------- VLM visual understanding (proposal section 7.2.1) ----------------
+    # PHOTO-ONLY searches (image uploaded, no text/voice) can also be described
+    # in words by a vision-language model (LLaVA via Ollama, or the CogVLM
+    # adapter). The description is encoded as a text query and fused with the
+    # image embedding by the existing z-normalised fusion. Off by default and
+    # fully optional: every failure silently keeps the old behaviour.
+    vlm_info = None
+    if tmp_imgs and not final_query and vlm_understanding.is_enabled():
+        vlm_info = await loop.run_in_executor(
+            None, vlm_understanding.describe_image, tmp_imgs[0])
+        if vlm_info:
+            phrase = vlm_understanding.build_photo_query(vlm_info)
+            if phrase:
+                final_query = phrase
+                print(f"[VLM] Photo-only query described as: {phrase!r}")
+
     try:
         # Image + pure color/style instruction ("similar but in black"): embed the
         # image only; the color is applied as a boost by the ranker.
@@ -823,6 +840,7 @@ async def search(
         "category_filter": category_filter or meta.get("inferred_category"),
         "material_filter": material_filter, "pattern_filter": pattern_filter,
         "low_confidence": meta.get("low_confidence", False),
+        "vlm_understanding": vlm_info,
         "search_mode": mode,
         "fallback_tier": fallback_tier,
         "ai_summary": f"Found {len(results)}{color_str} items matching "
