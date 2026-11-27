@@ -154,6 +154,10 @@ if MODELS_DIR.exists():
     app.mount("/static/models", _CORSStatic(directory=str(MODELS_DIR)), name="models")
 
 
+GENERATED_DIR = DATA_DIR / "generated"
+GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/generated", _CORSStatic(directory=str(GENERATED_DIR)), name="generated")
+
 @app.on_event("startup")
 async def startup():
     print("\n=== Server ready: http://localhost:8000 ===\n")
@@ -824,6 +828,51 @@ async def search(
         "ai_summary": f"Found {len(results)}{color_str} items matching "
                       f"'{final_query}' [{mode}]",
     }
+
+
+# ============================================================
+# Text -> image generation (used by the frontend "AI Image Generator")
+# ============================================================
+IMAGE_GEN_URL = os.getenv("IMAGE_GEN_URL", "https://image.pollinations.ai/prompt/")
+MAX_GENERATED_BYTES = 8 * 1024 * 1024
+
+
+def _generate_image_file(prompt: str) -> str:
+    """Blocking: request an image, validate it, store it, return the stored file name."""
+    import io
+    import uuid
+    from urllib.parse import quote
+    full = f"photo of {prompt}, furniture product photo, plain background"
+    try:
+        r = requests.get(f"{IMAGE_GEN_URL}{quote(full)}",
+                         params={"width": 512, "height": 512, "nologo": "true"},
+                         timeout=60)
+    except requests.RequestException as exc:
+        raise HTTPException(502, detail="The image generation service is unreachable") from exc
+    if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image/"):
+        raise HTTPException(502, detail="The image generation service returned no image")
+    if len(r.content) > MAX_GENERATED_BYTES:
+        raise HTTPException(502, detail="The generated image is too large")
+    try:
+        img = Image.open(io.BytesIO(r.content)).convert("RGB")
+    except Exception as exc:
+        raise HTTPException(502, detail="The generated file is not a valid image") from exc
+    name = f"{uuid.uuid4().hex}.jpg"
+    img.save(GENERATED_DIR / name, "JPEG", quality=92)
+    return name
+
+
+@app.post("/generate_image")
+async def generate_image(prompt: str = Form("")):
+    """Describe a furniture item in text and receive a generated image URL."""
+    prompt = " ".join((prompt or "").split())
+    if len(prompt) < 3:
+        raise HTTPException(422, detail="Please describe the furniture in at least 3 characters")
+    if len(prompt) > 300:
+        raise HTTPException(422, detail="Prompt is too long (max 300 characters)")
+    loop = asyncio.get_event_loop()
+    name = await loop.run_in_executor(None, _generate_image_file, prompt)
+    return {"image_url": f"{BASE_URL}/static/generated/{name}", "prompt": prompt}
 
 
 def _empty(typed, voice, verr, msg):
