@@ -201,8 +201,14 @@ class CatalogIndex:
         for r, p in enumerate(products_by_row):
             hist = p.get("color_hist") or {p.get("baseColour", ""): 1.0}   # fallback to old label
             for name, frac in hist.items():
-                if name in _CIDX:
-                    H[r, _CIDX[name]] = frac
+                # Fold every color label (e.g. "burgundy", "noir", "charcoal",
+                # "cream") into its canonical 13-family bin first, so labels
+                # outside COLOR_NAMES are not silently dropped. "burgundy"
+                # previously vanished here and its products got zero color
+                # credit for "red ..." queries.
+                fam = _ALIAS2COLOR.get(str(name).strip().lower())
+                if fam in _CIDX:
+                    H[r, _CIDX[fam]] += float(frac)
         self.H = H
 
     def color_scores(self, color: str) -> np.ndarray:
@@ -258,5 +264,14 @@ class CatalogIndex:
                 "text_cos": float(s_t[r]) if s_t is not None else None,
                 "image_cos": float(s_i[r]) if s_i is not None else None,
             })
-        meta["low_confidence"] = (not hits) or max(h["relevance"] for h in hits) < LOW_CONF_REL
+        if not hits:
+            meta["low_confidence"] = True
+        elif color is not None and max(h["color_match"] for h in hits) >= 0.5:
+            # The requested color is confirmed by the products' own color
+            # histograms, so a modest raw CLIP cosine does NOT mean the results
+            # are wrong (fixes "black sofa" returning 10 black sofas while the
+            # UI apologised for a weak match).
+            meta["low_confidence"] = False
+        else:
+            meta["low_confidence"] = max(h["relevance"] for h in hits) < LOW_CONF_REL
         return hits, meta

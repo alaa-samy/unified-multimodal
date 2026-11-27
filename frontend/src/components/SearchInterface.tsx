@@ -128,13 +128,18 @@ function generateAISummary(data: {
   const count = Number.isFinite(data.totalResults) ? data.totalResults : data.results.length;
   const description = displayQuery === "your photo" ? "your photo" : `"${displayQuery}"`;
 
+  // The requested color is satisfied when the backend returned it in the
+  // "exact" tier - the results really are what was asked for, so never say
+  // "couldn't find a strong match" in that case.
+  const colorSatisfied = !!color && fallbackTier === "exact";
+
   let summary: string;
-  if (data.lowConfidence && count > 0) {
-    summary = `I couldn't find a strong match for ${description}, so here are the closest visual matches. Try rephrasing or uploading a photo.`;
-  } else if (fallbackTier === "color_relaxed" && count > 0) {
+  if (fallbackTier === "color_relaxed" && count > 0) {
     summary = color
       ? `I found few items matching ${description} in ${color}, so here are the closest visual matches.`
       : `I found few items matching ${description}, so here are the closest visual matches.`;
+  } else if (data.lowConfidence && count > 0 && !colorSatisfied) {
+    summary = `I couldn't find a strong match for ${description}, so here are the closest items I found.`;
   } else if (count === 0) {
     summary = `I couldn't find any matches for ${description}. Try changing the color or rephrasing your search.`;
   } else {
@@ -577,7 +582,7 @@ export default function SearchInterface() {
                 </div>
                 {entry.lowConfidence && (
                   <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-md px-3 py-2">
-                    No strong match - showing the closest items
+                    No strong match — showing the closest items instead.
                   </p>
                 )}
                 <div className="grid grid-cols-2 md:grid-cols-3 gap-4">

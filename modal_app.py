@@ -2,14 +2,16 @@ import io
 import json
 import csv
 import os
+import uuid
 from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import numpy as np
+import requests
 import torch
-from fastapi import FastAPI, UploadFile, File, Form
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 from PIL import Image as PILImage
 from transformers import CLIPModel, CLIPProcessor
 
@@ -22,6 +24,7 @@ image = (
     .pip_install(
         "fastapi==0.104.1",
         "python-multipart==0.0.6",
+        "requests==2.31.0",
         "Pillow==10.1.0",
         "numpy==1.24.3",
         "torch==2.1.0",
@@ -471,6 +474,59 @@ def serve():
             return JSONResponse(content={"query": query, "results": results, "data_source": _data_source})
         except Exception as exc:
             return JSONResponse(status_code=500, content={"error": str(exc)})
+
+    # ------------------------------------------------------------ image generation
+    # Free text-to-image service (pollinations.ai) - same behaviour as
+    # backend/main.py POST /generate_image, so the frontend "AI Image
+    # Generator" button works against this Modal service too.
+    IMAGE_GEN_URL = os.getenv("IMAGE_GEN_URL", "https://image.pollinations.ai/prompt/")
+    MAX_GENERATED_BYTES = 8 * 1024 * 1024
+    GENERATED_DIR = Path("/tmp/generated")
+    GENERATED_DIR.mkdir(parents=True, exist_ok=True)
+
+    def _generate_image_file(prompt: str) -> str:
+        from urllib.parse import quote
+        full = f"photo of {prompt}, furniture product photo, plain background"
+        try:
+            r = requests.get(
+                f"{IMAGE_GEN_URL}{quote(full)}",
+                params={"width": 512, "height": 512, "nologo": "true"},
+                timeout=60,
+            )
+        except requests.RequestException:
+            raise HTTPException(502, detail="The image generation service is unreachable")
+        if r.status_code != 200 or not r.headers.get("content-type", "").startswith("image/"):
+            raise HTTPException(502, detail="The image generation service returned no image")
+        if len(r.content) > MAX_GENERATED_BYTES:
+            raise HTTPException(502, detail="The generated image is too large")
+        try:
+            img = PILImage.open(io.BytesIO(r.content)).convert("RGB")
+        except Exception:
+            raise HTTPException(502, detail="The generated file is not a valid image")
+        name = f"{uuid.uuid4().hex}.jpg"
+        img.save(GENERATED_DIR / name, "JPEG", quality=92)
+        return name
+
+    @api.post("/generate_image")
+    async def generate_image(request: Request, prompt: str = Form("")):
+        """Describe a furniture item in text and receive a generated image URL."""
+        prompt = " ".join((prompt or "").split())
+        if len(prompt) < 3:
+            raise HTTPException(422, detail="Please describe the furniture in at least 3 characters")
+        if len(prompt) > 300:
+            raise HTTPException(422, detail="Prompt is too long (max 300 characters)")
+        name = _generate_image_file(prompt)
+        base = str(request.base_url).rstrip("/")
+        return {"image_url": f"{base}/generated/{name}", "prompt": prompt}
+
+    @api.get("/generated/{name}")
+    def generated_file(name: str):
+        if not name.isalnum() or len(name) > 64:
+            raise HTTPException(404, detail="Not found")
+        path = GENERATED_DIR / f"{name}.jpg"
+        if not path.exists():
+            raise HTTPException(404, detail="Not found")
+        return FileResponse(path, media_type="image/jpeg")
 
     @api.post("/search/intelligent")
     async def intelligent_search(
