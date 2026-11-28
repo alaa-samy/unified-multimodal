@@ -170,6 +170,15 @@ function ModelViewer({ modelUrl, posterUrl, productName }: ModelViewerProps) {
   const [modelLoading, setModelLoading] = useState(true);
   const [ready, setReady] = useState(false);
 
+  // iOS Safari's Quick Look AR only supports USDZ files; this catalog serves
+  // GLB assets, so on iPhone/iPad the viewer shows the interactive 3D view
+  // only (documented as future work in the thesis).
+  const [isIOS] = useState(() =>
+    typeof navigator !== "undefined" &&
+    (/iPad|iPhone|iPod/.test(navigator.userAgent) ||
+     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1))
+  );
+
   useEffect(() => {
     let cancelled = false;
     const scriptId = "model-viewer-script";
@@ -206,12 +215,17 @@ function ModelViewer({ modelUrl, posterUrl, productName }: ModelViewerProps) {
       {(!ready || modelLoading) && <div className="absolute inset-0 z-10 flex items-center justify-center bg-gray-900 text-white">
         <div className="text-center"><div className="w-12 h-12 border-4 border-purple-600 border-t-transparent rounded-full animate-spin mx-auto mb-3" /><p>{ready ? "Loading 3D model…" : "Loading AR viewer…"}</p></div>
       </div>}
+      {ready && isIOS && (
+        <div className="absolute top-3 left-1/2 z-20 w-[92%] -translate-x-1/2 rounded-lg bg-black/75 px-3 py-2 text-center text-xs text-white">
+          On iPhone and iPad this product opens as an interactive 3D view. Placing it in your room (AR) needs a different 3D format and is planned for a future version.
+        </div>
+      )}
       {ready && (
         <ModelViewerTag
           src={modelUrl}
           poster={posterUrl || undefined}
           alt={productName}
-          ar
+          ar={!isIOS}
           ar-modes="webxr scene-viewer quick-look"
           camera-controls
           auto-rotate
